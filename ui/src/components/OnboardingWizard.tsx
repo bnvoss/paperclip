@@ -1713,7 +1713,6 @@ function OnboardingWizardInner({
     // preselection this step was changed to stop doing. The saved answer was
     // unofferable, so the question is open again.
     setSourcePicked(false);
-    if (next === "codex_local") return;
     if (next === "opencode_local") {
       setModel(DEFAULT_OPENCODE_LOCAL_MODEL);
       return;
@@ -3043,6 +3042,13 @@ function OnboardingWizardInner({
                         setConnectPhase("collapsing");
                       }}
                     />
+
+                    {adapterRegistryLoaded && recommendedAdapters.length === 0 && (
+                      <p role="status" className="text-sm text-muted-foreground">
+                        Claude and Codex are unavailable on this instance. Ask an administrator to enable one,
+                        or exit setup and choose New Agent on the Agents page to use another provider.
+                      </p>
+                    )}
 
                     {/* Fades on the first beat but keeps its space until the
                         second, so pressing a tile moves nothing vertically.

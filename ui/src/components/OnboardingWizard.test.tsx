@@ -501,6 +501,31 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         });
       } finally { await act(async () => root.unmount()); }
     });
+
+    it("clears a saved Gemini model when only Codex is available", async () => {
+      mockAdapterRegistry.disabled = new Set(["claude_local"]);
+      const root = await openProviderChoices({ adapterType: "gemini_local", model: "gemini-model" });
+      try {
+        expect(document.body.querySelector('button[aria-checked="true"]')).toBeNull();
+        expect(JSON.parse(window.localStorage.getItem(ONBOARDING_STORAGE_KEY)!)).toMatchObject({
+          adapterType: "codex_local", model: "",
+        });
+        expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      } finally { await act(async () => root.unmount()); }
+    });
+
+    it("explains how to proceed when both onboarding providers are disabled", async () => {
+      mockAdapterRegistry.disabled = new Set(["claude_local", "codex_local"]);
+      const root = await openProviderChoices();
+      try {
+        expect(document.body.querySelectorAll("button[aria-checked]")).toHaveLength(0);
+        expect(document.body.textContent).toContain("Claude and Codex are unavailable on this instance.");
+        expect(document.body.textContent).toContain("choose New Agent on the Agents page");
+        const next = [...document.body.querySelectorAll("button")].find(button => isArcPrimary(button.textContent?.trim() ?? ""));
+        expect(next?.disabled).toBe(true);
+        expect(mockAgentsApi.hire).not.toHaveBeenCalled();
+      } finally { await act(async () => root.unmount()); }
+    });
   });
 
   describe("step 1 leads straight to the agent — there is no mission step 2", () => {
