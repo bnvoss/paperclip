@@ -6,6 +6,10 @@ import { isSupportedAcpxProfileVersion } from "./profile-compatibility.js";
 
 describe("historical ACPX profile decoding", () => {
   it.each([
+    ["copilot", "copilot-profile-v88-identity.json", "81e5fbccf057c04e012f638dc7a02c5758bf6ca67f7c4ed0045f3f61525401c2", "published cd5"],
+    ["copilot", "copilot-profile-v88-cursor-cloud-qualification-historical-identity.json", "6010dc772d914afec7dd31f35f953ce74b65ab3a648ce54aaee559f908b492f9", "private Cloud qualification"],
+    ["grok", "grok-profile-v15-identity.json", "54f7063c82dc5b135a9b5e2b0d8653b5c839a42bbc3a845dbcfb6cd225fa623f", "published cd5"],
+    ["grok", "grok-profile-v15-cursor-cloud-qualification-historical-identity.json", "f5d4b41284d60413575f88371e66e940942c256d8b6d9619104deaee181054b2", "private Cloud qualification"],
     ["copilot", "copilot-profile-v86-identity.json", "6baeb98adc7132b2afdce8b1d2da1df2f00356677eb4497c49c05aa9def79138", "published a8"],
     ["copilot", "copilot-profile-v86-cursor-cloud-qualification-historical-identity.json", "118a4b0a782b56570e5530cca91255da8932c31f827c319b40a5810bd4d446e9", "private Cloud qualification"],
     ["copilot", "copilot-profile-v87-identity.json", "505bb72a933d11e3f5aa8a1700d239c06b4d34bb83d5187470483812df996501", "published a8"],
