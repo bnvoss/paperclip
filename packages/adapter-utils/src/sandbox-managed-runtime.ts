@@ -1516,7 +1516,7 @@ export async function prepareSandboxManagedRuntime(input: {
   await withTempDir("paperclip-sandbox-sync-", async (tempDir) => {
     const cachedSeed = seedGeneration
       ? await runStepSpan("workspace.seed_lookup", () => readWorkspaceSeedGeneration(input.workspaceSeedCacheDirectory!, seedGeneration,
-        { companyDirectory: input.workspaceSeedCacheCompanyDirectory, privateCopyDirectory: tempDir })) : null;
+        { companyDirectory: input.workspaceSeedCacheCompanyDirectory, privateCopyDirectory: tempDir, runtimeSpan: runStepSpan })) : null;
     const replaySeed = workspaceInboundMode === "durable_seed" ? input.workspaceDurableSeed : cachedSeed;
     const preservedNames = new Set([
       ".paperclip-runtime",

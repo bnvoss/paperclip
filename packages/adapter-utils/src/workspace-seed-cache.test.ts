@@ -26,6 +26,32 @@ async function fixture() {
 }
 const generation = (index: number) => index.toString(16).padStart(64, "0");
 
+it("does not wait for storage flushes when publishing a rebuildable cache", async () => {
+  const f = await fixture();
+  const blocked = deferred<"flush_wait">(), release = deferred<void>();
+  const open = fs.open.bind(fs);
+  vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+    const file = await open(...args);
+    if (String(args[0]).includes(".pending-")) {
+      vi.spyOn(file, "sync").mockImplementation(async () => {
+        blocked.resolve("flush_wait");
+        await release.promise;
+      });
+    }
+    return file;
+  });
+  const publishing = publishWorkspaceSeedGeneration(f.workspace, generation(1), f.seed);
+  try {
+    expect(await Promise.race([publishing, blocked.promise])).toBe(true);
+    const cached = await readWorkspaceSeedGeneration(f.workspace, generation(1));
+    expect(await fs.readFile(cached!.workspaceArchivePath, "utf8")).toBe("run recovery bytes");
+    expect(await fs.readFile(f.archive, "utf8")).toBe("run recovery bytes");
+  } finally {
+    release.resolve();
+    await publishing;
+  }
+});
+
 it("returns verified private copies that survive subsequent cache changes", async () => {
   const f = await fixture();
   const git = path.join(f.root, "git.tar"); await fs.writeFile(git, "git recovery bytes");
@@ -130,7 +156,6 @@ it("keeps company-lock contention outside the locked-publication span", async ()
   for (const names of spans) {
     expect(names).toContain("workspace.seed_cache_locked_publish");
     expect(names).toContain("workspace.seed_cache_evict");
-    expect(names).toContain("workspace.seed_cache_sync");
     expect(names).toContain("workspace.seed_cache_hash");
   }
   for (const [name, index] of [["first", 1], ["second", 2]] as const) {

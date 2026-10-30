@@ -29,7 +29,9 @@ async function digest(file: string): Promise<string> {
 
 /** A privateCopyDirectory must be caller-owned staging; its caller owns cleanup. */
 export async function readWorkspaceSeedGeneration(root: string, generation: string,
-  options: { companyDirectory?: string; privateCopyDirectory?: string } = {}): Promise<WorkspaceDurableSeedPaths | null> {
+  options: { companyDirectory?: string; privateCopyDirectory?: string; runtimeSpan?: RuntimeSpanRunner } = {}): Promise<WorkspaceDurableSeedPaths | null> {
+  const measure = <T>(name: string, work: () => Promise<T>): Promise<T> =>
+    options.runtimeSpan ? options.runtimeSpan(name, work) : work();
   const directory = path.join(root, generation);
   let privateCopy: string | null = null;
   let accepted = false;
@@ -56,16 +58,16 @@ export async function readWorkspaceSeedGeneration(root: string, generation: stri
       if (!stat.isFile() || stat.isSymbolicLink()) return null;
       // Hash the exact private bytes staging will consume. This avoids a
       // second source hash and remains valid if the shared cache changes later.
-      if (privateCopy) await fs.copyFile(source, file, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL);
-      if (await digest(file) !== expected) return null;
+      if (privateCopy) await measure("workspace.seed_read_copy", () => fs.copyFile(source, file, constants.COPYFILE_FICLONE | constants.COPYFILE_EXCL));
+      if (await measure("workspace.seed_read_hash", () => digest(file)) !== expected) return null;
     }
-    const used = await withDirectoryMergeLock(path.resolve(options.companyDirectory ?? root), async () => {
+    const used = await measure("workspace.seed_read_touch", () => withDirectoryMergeLock(path.resolve(options.companyDirectory ?? root), async () => {
       const current = await fs.lstat(receipt).catch(() => null);
       if (!current || current.ino !== receiptStat.ino || current.dev !== receiptStat.dev) return false;
       const usedAt = new Date();
       await fs.utimes(receipt, usedAt, usedAt);
       return true;
-    });
+    }));
     if (!used) return null;
     accepted = true;
     return { workspaceArchivePath, workspaceArchiveSha256: metadata.workspaceSha256,
@@ -259,10 +261,10 @@ export async function publishWorkspaceSeedGeneration(
         const copy = async (source: string, name: string) => {
           const target = path.join(temporary, name);
           await measure("workspace.seed_cache_copy", () => fs.link(source, target).catch(() => fs.copyFile(source, target)));
-          await measure("workspace.seed_cache_sync", async () => {
-            const file = await fs.open(target, "r");
-            try { await file.sync(); } finally { await file.close(); }
-          });
+          // This cache can be discarded and rebuilt after a crash. Readers hash
+          // every archive before reuse; a missing or partial write is a miss.
+          // Do not flush optional cache bytes while holding the company lock.
+          // Per-run recovery archives are persisted separately by the caller.
           return measure("workspace.seed_cache_hash", () => digest(target));
         };
         const workspaceSha256 = await copy(seed.workspaceArchivePath, "workspace.tar");
