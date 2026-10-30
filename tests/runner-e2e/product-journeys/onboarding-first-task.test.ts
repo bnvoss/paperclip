@@ -319,7 +319,7 @@ describe("Cloud canonical onboarding first task", () => {
       if (mode === "stale-version") state.tasks[1]!.statusVersion++;
       if (mode === "newer-producer") state.runs.push({ ...run, id: "newer-child-run", createdAt: "2026-01-01T00:00:02Z",
         finishedAt: "2026-01-01T00:00:03Z", resultJson: { finalizationPhase: "committed", prpReportedWorkDisposition: "completed" } });
-      if (mode === "agent-owner") state.tasks[1]!.unblockDescriptor.owner = "agent";
+      if (mode === "agent-owner") state.tasks[1]!.unblockDescriptor.owner = { agentId: "other-agent" };
     } });
     await expect(onboardingFirstTask(f.input)).resolves.toMatchObject({ artifact: { originatingRunId: "child-run" } });
     expect(connectionDelay).toHaveBeenCalledOnce();

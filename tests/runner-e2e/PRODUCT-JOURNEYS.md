@@ -122,6 +122,9 @@ An approved child that commits a board-owned current-track blocker fails with
 run must prove the blocked decision at the child's current status version.
 Parent dependency waits, pending recovery, and stale child decisions keep waiting
 within the original deadline. This failure does not satisfy any delivery check.
+The [semantic control-plane port](../../server/src/services/native-runtime/paperclip-control-plane-port.ts)
+writes `prpReportedWorkDisposition`. [Native finalization](../../server/src/services/native-runtime/native-run-finalizer.ts)
+commits the blocked decision and `statusVersionAfter` into the run's `resultJson`.
 
 The attached `ask-question` recipe requires a prepared native general agent and
 an explicit execution environment. Legacy execution is unsupported until its
