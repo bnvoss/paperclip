@@ -117,6 +117,12 @@ board-owned recovery, and exhausted attempts still fail. The producing turn must
 settle before proposal acceptance, and the recovered child must actually succeed
 before the existing document, artifact, download, and parent-link checks can pass.
 
+An approved child that commits a board-owned current-track blocker fails with
+`onboarding_child_task_blocked` once all owned work has settled. The latest child
+run must prove the blocked decision at the child's current status version.
+Parent dependency waits, pending recovery, and stale child decisions keep waiting
+within the original deadline. This failure does not satisfy any delivery check.
+
 The attached `ask-question` recipe requires a prepared native general agent and
 an explicit execution environment. Legacy execution is unsupported until its
 saved model/provider identity can be verified. A registered
