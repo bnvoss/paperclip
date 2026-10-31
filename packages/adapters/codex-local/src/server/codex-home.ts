@@ -27,6 +27,22 @@ export const CODEX_SYNC_ALLOWLIST = [
   "skills",
 ] as const;
 
+/** Managed AI homes on the controller are temporary credential wrappers.
+ * Remote execution must use the curated remote asset, never those local paths.
+ * Call only for a managed AI connection; explicit unmanaged home overrides keep
+ * their existing semantics.
+ */
+export function remoteManagedCodexHomeEnv(remoteHome: string): Record<string, string> {
+  return {
+    HOME: remoteHome,
+    XDG_CONFIG_HOME: path.posix.join(remoteHome, "config"),
+    XDG_DATA_HOME: path.posix.join(remoteHome, "data"),
+    CODEX_HOME: remoteHome,
+    GROK_HOME: remoteHome,
+    CLAUDE_CONFIG_DIR: remoteHome,
+  };
+}
+
 export type ManagedCodexMcpGateway = {
   name: string;
   endpointPath: string;

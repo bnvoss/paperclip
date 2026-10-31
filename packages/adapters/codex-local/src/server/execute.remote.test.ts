@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   runChildProcess,
@@ -79,8 +79,21 @@ import { execute } from "./execute.js";
 describe("codex remote execution", () => {
   const cleanupDirs: string[] = [];
 
+  beforeEach(async () => {
+    // The cache vend runs before a configured remote home is prepared. Keep
+    // all controller credential/cache access inside synthetic fixture roots.
+    const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-controller-"));
+    cleanupDirs.push(root);
+    const home = path.join(root, "codex");
+    await mkdir(home);
+    vi.stubEnv("CODEX_HOME", home);
+    vi.stubEnv("PAPERCLIP_HOME", path.join(root, "instance"));
+    vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
+  });
+
   afterEach(async () => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     while (cleanupDirs.length > 0) {
       const dir = cleanupDirs.pop();
       if (!dir) continue;
@@ -88,7 +101,7 @@ describe("codex remote execution", () => {
     }
   });
 
-  it("prepares the workspace, syncs CODEX_HOME, and restores workspace changes for remote SSH execution", async () => {
+  it.each([false, true])("prepares curated remote homes and restores workspace changes (managed AI connection: %s)", async (managedAiConnection) => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-"));
     cleanupDirs.push(rootDir);
     const workspaceDir = path.join(rootDir, "workspace");
@@ -119,8 +132,14 @@ describe("codex remote execution", () => {
       config: {
         engine: "cli",
         command: "codex",
+        managedAiConnection: managedAiConnection ? { provider: "openai", method: "subscription" } : undefined,
         env: {
           CODEX_HOME: codexHomeDir,
+          HOME: rootDir,
+          XDG_CONFIG_HOME: path.join(rootDir, "config"),
+          XDG_DATA_HOME: path.join(rootDir, "data"),
+          GROK_HOME: codexHomeDir,
+          CLAUDE_CONFIG_DIR: codexHomeDir,
         },
       },
       context: {
@@ -190,6 +209,12 @@ describe("codex remote execution", () => {
       | undefined;
     expect(call?.[2]).not.toContain("--skip-git-repo-check");
     expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
+    const expectedHome = managedAiConnection ? `${managedRemoteWorkspace}/.paperclip-runtime/codex/home` : rootDir;
+    expect(call?.[3].env.HOME).toBe(expectedHome);
+    expect(call?.[3].env.XDG_CONFIG_HOME).toBe(`${expectedHome}/config`);
+    expect(call?.[3].env.XDG_DATA_HOME).toBe(`${expectedHome}/data`);
+    expect(call?.[3].env.GROK_HOME).toBe(managedAiConnection ? expectedHome : codexHomeDir);
+    expect(call?.[3].env.CLAUDE_CONFIG_DIR).toBe(managedAiConnection ? expectedHome : codexHomeDir);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_CWD).toBe(managedRemoteWorkspace);
     expect(call?.[3].env.PAPERCLIP_WORKSPACE_WORKTREE_PATH).toBeUndefined();
     expect(JSON.parse(call?.[3].env.PAPERCLIP_WORKSPACES_JSON ?? "[]")).toEqual([

@@ -28,6 +28,7 @@ import {
   isManagedCodexHomePath,
   prepareManagedCodexHome,
   resolveSharedCodexHomeDir,
+  remoteManagedCodexHomeEnv,
   seedManagedCodexHome,
 } from "./codex-home.js";
 import {
@@ -206,7 +207,12 @@ async function prepareCodexHelloProbe(input: {
       command: input.command,
       args: input.args,
       env: preparedRuntime.assetDirs.home
-        ? { ...input.env, CODEX_HOME: preparedRuntime.assetDirs.home }
+        ? {
+          ...input.env,
+          ...(input.managedAiConnection
+            ? remoteManagedCodexHomeEnv(preparedRuntime.assetDirs.home)
+            : { CODEX_HOME: preparedRuntime.assetDirs.home }),
+        }
         : { ...input.env },
       cleanup,
     };

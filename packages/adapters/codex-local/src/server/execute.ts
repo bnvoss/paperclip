@@ -77,6 +77,7 @@ import {
   prepareManagedCodexHome,
   resolveManagedCodexHomeDir,
   resolveSharedCodexHomeDir,
+  remoteManagedCodexHomeEnv,
   seedManagedCodexHome,
   stageCodexHomeForSync,
   mergeManagedCodexMcpGateways,
@@ -969,6 +970,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
     }
     env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+    if (remoteCodexHome && config.managedAiConnection) {
+      Object.assign(env, remoteManagedCodexHomeEnv(remoteCodexHome));
+    }
     if (authToken) {
       env.PAPERCLIP_API_KEY = authToken;
     }
