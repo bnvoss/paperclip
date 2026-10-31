@@ -97,6 +97,8 @@ interface SpawnTarget {
   args: string[];
   cwd?: string;
   env?: Record<string, string | undefined>;
+  /** Internal transport input; never part of normal prompt/log metadata. */
+  transportStdin?: string;
   cleanup?: () => Promise<void>;
 }
 
@@ -3604,6 +3606,7 @@ async function resolveSpawnTarget(
   options: {
     remoteExecution?: RemoteExecutionSpec | null;
     remoteEnv?: Record<string, string> | null;
+    stdin?: string;
     localProcessSandbox?: LocalProcessSandboxOptions | null;
   } = {},
 ): Promise<SpawnTarget> {
@@ -3617,6 +3620,7 @@ async function resolveSpawnTarget(
       spec: remote,
       command,
       args,
+      stdin: options.stdin,
       env: Object.fromEntries(
         Object.entries(options.remoteEnv ?? {}).filter(
           (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -3626,6 +3630,7 @@ async function resolveSpawnTarget(
     return {
       command: sshResolved,
       args: spawnTarget.args,
+      transportStdin: spawnTarget.transportStdin,
       cwd: process.cwd(),
       cleanup: spawnTarget.cleanup,
     };
@@ -4711,9 +4716,11 @@ export async function runChildProcess(
     void resolveSpawnTarget(command, args, opts.cwd, mergedEnv, {
       remoteExecution: opts.remoteExecution ?? null,
       remoteEnv: opts.remoteExecution ? opts.env : null,
+      stdin: opts.stdin,
       localProcessSandbox: opts.localProcessSandbox ?? null,
     })
       .then((target) => {
+        const childStdin = target.transportStdin ?? opts.stdin;
         const childEnv = { ...mergedEnv, ...target.env };
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
@@ -4723,7 +4730,7 @@ export async function runChildProcess(
           env: childEnv,
           detached: process.platform !== "win32",
           shell: false,
-          stdio: [opts.stdin != null ? "pipe" : "ignore", "pipe", "pipe"],
+          stdio: [childStdin != null ? "pipe" : "ignore", "pipe", "pipe"],
         }) as ChildProcessWithEvents;
         const startedAt = new Date().toISOString();
         const processGroupId = resolveProcessGroupId(child);
@@ -4877,10 +4884,17 @@ export async function runChildProcess(
         });
 
         const stdin = child.stdin;
-        if (opts.stdin != null && stdin) {
+        if (childStdin != null && stdin) {
+          // A failed remote launch may close the pipe before it reads input.
+          // Child exit/error handling below remains the authoritative result.
+          stdin.on("error", (error: NodeJS.ErrnoException) => {
+            if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") return;
+            signalRunningProcess({ child, processGroupId }, "SIGTERM");
+            reject(new Error("Failed to write command input."));
+          });
           void spawnPersistPromise.finally(() => {
             if (child.killed || stdin.destroyed) return;
-            stdin.write(opts.stdin as string);
+            stdin.write(childStdin);
             stdin.end();
           });
         }

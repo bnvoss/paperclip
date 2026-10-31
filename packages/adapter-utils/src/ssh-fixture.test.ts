@@ -491,10 +491,12 @@ describe("ssh env-lab fixture", () => {
     // nvm in .bashrc still resolves node under a non-login SSH command.
     expect(remoteScript).toContain(".bashrc");
     // The last ssh argument wraps the script as `sh -c '...'`, so the inner
-    // quotes are escaped. Assert the command still runs: cd, env, and the argv.
+    // quotes are escaped. Env values travel separately from this command.
     expect(remoteScript).toContain("cd ");
     expect(remoteScript).toContain("/srv/paperclip/workspace");
-    expect(remoteScript).toContain("exec env ");
+    expect(remoteScript).not.toContain("exec env ");
+    expect(remoteScript).not.toContain("FOO=");
+    expect(target.transportStdin).toBe(`${Buffer.from("export FOO='bar' 2>/dev/null || exit 125").toString("base64")}\n`);
     expect(remoteScript).toContain("node");
     expect(remoteScript).toContain("--version");
     await target.cleanup();
@@ -519,7 +521,7 @@ describe("ssh env-lab fixture", () => {
           "BAD KEY": "value",
         },
       }),
-    ).rejects.toThrow("Invalid SSH environment variable key: BAD KEY");
+    ).rejects.toThrow("Invalid SSH environment variable key");
   });
 
   it("syncs a local directory into the remote fixture workspace", async () => {
