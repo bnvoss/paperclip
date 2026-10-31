@@ -1,3 +1,4 @@
+import { trustedSshTaskHasProtectedFields, trustedSshTaskLaunchEffects } from "../services/native-runtime/trusted-ssh-launch-effects.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -234,6 +235,7 @@ import { privateJsonEtag } from "../middleware/private-json-etag.js";
 import { createRequestPromiseMemo } from "../lib/request-promise-memo.js";
 import {
   assertBoard,
+  assertInstanceAdmin,
   assertCompanyAccess,
   getAccessibleResource,
   getActorInfo,
@@ -3737,6 +3739,22 @@ export function issueRoutes(
   };
   const feedbackExportService = opts?.feedbackExportService;
   const environmentsSvc = environmentService(db);
+
+  async function assertTrustedIssueLaunchChangeAdmin(req: Request, companyId: string,
+    before: Record<string, unknown> | null, after: Record<string, unknown>) {
+    if (!trustedSshTaskHasProtectedFields(before ?? {}) && !trustedSshTaskHasProtectedFields(after)) return;
+    const assigneeId = typeof after.assigneeAgentId === "string" ? after.assigneeAgentId : null;
+    if (!assigneeId) return;
+    const agent = await agentsSvc.getById(assigneeId);
+    if (!agent || agent.companyId !== companyId) return;
+    const prior = before?.assigneeAgentId === assigneeId ? before : {};
+    if (JSON.stringify(trustedSshTaskLaunchEffects(agent.adapterType, agent.adapterConfig, prior)) ===
+        JSON.stringify(trustedSshTaskLaunchEffects(agent.adapterType, agent.adapterConfig, after))) return;
+    const selectedId = agent.defaultEnvironmentId ?? (await instanceSettings.get()).defaultEnvironmentId;
+    if (!selectedId) return;
+    const environment = await environmentsSvc.getById(selectedId);
+    if (environment?.driver === "ssh" && environment.config?.trustedManagement === true) assertInstanceAdmin(req);
+  }
 
   async function queueTaskWatchdogEvaluation(
     issue: { id: string; companyId: string },
@@ -11786,6 +11804,7 @@ export function issueRoutes(
             }
           : {}),
       };
+      await assertTrustedIssueLaunchChangeAdmin(req, companyId, null, createBody);
       const createAssignmentScope = {
         projectId: await resolveCreateAssignmentProjectId({ ...createBody, companyId }),
         parentIssueId: createBody.parentId ?? null,
@@ -12131,6 +12150,7 @@ export function issueRoutes(
           ? { assigneeAgentId: normalizedAssigneeAgentId }
           : {}),
       };
+      await assertTrustedIssueLaunchChangeAdmin(req, parent.companyId, null, createBody);
       const childAssignmentScope = {
         projectId: await resolveCreateAssignmentProjectId({ ...createBody, companyId: parent.companyId, parentId: parent.id }),
         parentIssueId: parent.id,
@@ -12370,6 +12390,7 @@ export function issueRoutes(
             ? { assigneeAgentId: normalizedAssigneeAgentId }
             : {}),
         };
+        await assertTrustedIssueLaunchChangeAdmin(req, sourceIssue.companyId, null, childBody);
         requestedChildren.push(childBody);
         assertNoAgentHostWorkspaceCommandMutation(
           req,
@@ -12969,6 +12990,8 @@ export function issueRoutes(
         normalizedAssigneeAgentId === undefined
           ? existing.assigneeAgentId
           : normalizedAssigneeAgentId;
+      await assertTrustedIssueLaunchChangeAdmin(req, existing.companyId, existing as unknown as Record<string, unknown>,
+        { ...existing, ...updateFields, assigneeAgentId: requestedAssigneeAgentId });
       const explicitMoveToTodoRequested =
         reopenRequested || resumeRequested === true;
       const recoveryRelevantSourceMutationRequested =

@@ -21,6 +21,7 @@ import {
 export interface CodexNativeSessionBackendOptions {
   /** Effective provider environment, including the assigned workspace boundary. */
   environment?: NodeJS.ProcessEnv;
+  permissionMode?: import("../drivers/codex/codex-security-config.js").CodexPermissionMode;
   /** Filesystem that authoritatively admits the workspace path. */
   workingDirectoryAuthority?: CodexWorkingDirectoryAuthority;
   runnerInstanceId?: string;
@@ -182,6 +183,7 @@ function createTransportBackedNativeSessionBackend(
       dynamicToolHandler: options.dynamicToolHandler,
       completionFeedback: options.completionFeedback,
       environment: options.environment,
+      permissionMode: options.permissionMode,
       workingDirectoryAuthority: options.workingDirectoryAuthority,
       driverIdentity,
       capabilities: isCodex

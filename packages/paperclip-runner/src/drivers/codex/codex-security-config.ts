@@ -74,6 +74,12 @@ export const CODEX_PLANNING_PERMISSION_PROFILE =
 export const CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE =
   "paperclip-runner-external-sandbox";
 
+export const CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE =
+  "paperclip-runner-trusted-ssh-management-v1";
+
+/** Only a controller-resolved execution target may select a broader mode. */
+export type CodexPermissionMode = "workspace" | "external-sandbox" | "trusted-ssh-management";
+
 export function codexNetworkAccess(source: NodeJS.ProcessEnv = process.env): boolean {
   return source.PAPERCLIP_RUNNER_NETWORK_ACCESS === "enabled";
 }
@@ -96,10 +102,6 @@ function gitFilesystemRoots(source: NodeJS.ProcessEnv): { read: string[]; write:
     }
   }
   return { read: [...new Set(read)], write: [...new Set(write)] };
-}
-
-function usesExternalRunnerSandbox(source: NodeJS.ProcessEnv): boolean {
-  return source.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX === "1";
 }
 
 const SKILLLESS_BASE_CONFIG = {
@@ -171,11 +173,15 @@ export function createIsolatedCodexAppServerArgs(
   readOnlyRoots: string[] = [],
   /** Server-registered run copy, never an environment/config-supplied root. */
   instructionWorkingCopyRoot?: string,
+  permissionMode: CodexPermissionMode = "workspace",
 ): string[] {
   const gitRoots = gitFilesystemRoots(source);
   readOnlyRoots = [...new Set([...readOnlyRoots, ...codexNetworkReadOnlyRoots(source)])];
   const networkAccess = codexNetworkAccess(source);
-  const externalRunnerSandbox = usesExternalRunnerSandbox(source);
+  const broadPermissionProfile = permissionMode === "external-sandbox"
+    ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
+    : permissionMode === "trusted-ssh-management"
+      ? CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE : null;
   const inheritedGitHubKeys = githubCredentialEnvironmentKeys(source);
   const hasProjectedEnvironment = inheritedGitHubKeys.length > 0;
   // Codex filters the configured `set` values through include_only as well.
@@ -222,9 +228,7 @@ export function createIsolatedCodexAppServerArgs(
   const commandEnv = Object.entries(commandEnvironment)
     .map(([key, value]) => `${key}=${tomlString(value)}`)
     .join(",");
-  const defaultPermissionProfile = externalRunnerSandbox
-    ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
-    : CODEX_SKILLLESS_PERMISSION_PROFILE;
+  const defaultPermissionProfile = broadPermissionProfile ?? CODEX_SKILLLESS_PERMISSION_PROFILE;
   return [
     "-c",
     `default_permissions=${tomlString(defaultPermissionProfile)}`,
@@ -232,12 +236,12 @@ export function createIsolatedCodexAppServerArgs(
     `permissions.${CODEX_SKILLLESS_PERMISSION_PROFILE}.filesystem={${filesystemRules}}`,
     "-c",
     `permissions.${CODEX_SKILLLESS_PERMISSION_PROFILE}.network.enabled=${networkAccess}`,
-    ...(externalRunnerSandbox
+    ...(broadPermissionProfile
       ? [
           "-c",
-          `permissions.${CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE}.filesystem={":root"="write"}`,
+          `permissions.${broadPermissionProfile}.filesystem={":root"="write"}`,
           "-c",
-          `permissions.${CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE}.network.enabled=${networkAccess}`,
+          `permissions.${broadPermissionProfile}.network.enabled=${networkAccess}`,
         ]
       : []),
     "-c",
@@ -258,7 +262,7 @@ export function createIsolatedCodexAppServerArgs(
       : []),
     "--disable",
     "image_generation",
-    ...(externalRunnerSandbox
+    ...(broadPermissionProfile
       ? ["--dangerously-bypass-approvals-and-sandbox"]
       : []),
     "app-server",
@@ -270,14 +274,13 @@ export function createSecuredCodexThreadParams(
   mode: "default" | "plan" = "default",
   includeCollaborationModeInstructions = true,
   includeSkillInstructions = false,
-  source: NodeJS.ProcessEnv = process.env,
+  _source: NodeJS.ProcessEnv = process.env,
+  permissionMode: CodexPermissionMode = "workspace",
 ): Record<string, unknown> {
-  const permissionProfile =
-    mode === "default" && usesExternalRunnerSandbox(source)
-      ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
-      : mode === "plan"
-      ? CODEX_PLANNING_PERMISSION_PROFILE
-      : CODEX_SKILLLESS_PERMISSION_PROFILE;
+  const permissionProfile = mode === "plan" ? CODEX_PLANNING_PERMISSION_PROFILE
+    : permissionMode === "external-sandbox" ? CODEX_EXTERNAL_SANDBOX_PERMISSION_PROFILE
+    : permissionMode === "trusted-ssh-management" ? CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE
+    : CODEX_SKILLLESS_PERMISSION_PROFILE;
   return {
     cwd: workingDirectory,
     config: collaborationThreadConfig(

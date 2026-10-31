@@ -36,7 +36,7 @@ afterEach(async () => {
   while (roots.length) await rm(roots.pop()!, { recursive: true, force: true });
 });
 
-async function fixture({ traceProfile = true } = {}) {
+async function fixture({ traceProfile = true, ambientEnvironment = false } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-stdin-"));
   roots.push(root);
   const record = path.join(root, "ssh.json");
@@ -64,8 +64,9 @@ const hosts = args.find(arg => arg.startsWith('UserKnownHostsFile='));
 const files = [keyIndex < 0 ? null : args[keyIndex + 1], hosts?.split('=')[1]].filter(p => p && p !== '/dev/null');
 fs.writeFileSync(${JSON.stringify(record)}, JSON.stringify({args,files:files.map(p => ({path:p,mode:fs.statSync(p).mode & 0o777,dirMode:fs.statSync(require('node:path').dirname(p)).mode & 0o777}))}),{mode:0o600});
 if (process.env.PAPERCLIP_SYNTHETIC_SSH_FAIL === 'yes') process.exit(255);
+${ambientEnvironment ? `fs.writeFileSync(${JSON.stringify(path.join(root, "outer-shell-started"))}, 'trusted account initialization happened before the controlled bootstrap');` : ""}
 const child = spawn('/bin/sh', ['-c', args.at(-1)], {
-  env:{PATH:${JSON.stringify(systemPath)},HOME:${JSON.stringify(root)}},
+  env:{PATH:${JSON.stringify(systemPath)},HOME:${JSON.stringify(root)},...${JSON.stringify(ambientEnvironment ? { OPENAI_API_KEY: "synthetic-ambient-openai", CODEX_API_KEY: "synthetic-ambient-codex", CODEX_HOME: root, PAPERCLIP_OUTER_SHELL_MARKER: "allowed-before-controlled-bootstrap" } : {})}},
   stdio:'inherit',
 });
 process.on('SIGTERM', () => child.kill('SIGTERM'));
@@ -84,7 +85,7 @@ const snapshot = () => ({
   pid:process.pid,
   argv:process.argv,
   processArgv:execFileSync('ps',['-o','pid=,ppid=,args=','-p',[process.pid,process.ppid].join(',')],{encoding:'utf8'}),
-  env:Object.fromEntries(['PAPERCLIP_API_KEY','PAPERCLIP_BRIDGE_TOKEN','EMPTY_VALUE','PAPERCLIP_SYNTHETIC_PROFILE_READ'].map(k=>[k,process.env[k]])),
+  env:Object.fromEntries(${JSON.stringify(["PAPERCLIP_API_KEY", "PAPERCLIP_BRIDGE_TOKEN", "EMPTY_VALUE", "PAPERCLIP_SYNTHETIC_PROFILE_READ", ...(ambientEnvironment ? ["HOME", "CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY", "PAPERCLIP_OUTER_SHELL_MARKER", "SSL_CERT_FILE"] : [])])}.map(k=>[k,process.env[k]])),
   input:Buffer.concat(input).toString('base64'),
 });
 process.stdin.on('data', chunk => input.push(chunk));
@@ -190,6 +191,41 @@ async function verify(
 describe.skipIf(process.platform === "win32")(
   "SSH confidential environment stdin transport",
   () => {
+    it.each(["spawn", "command"])("isolates the controlled trusted bootstrap through %s without claiming outer-shell isolation", async lane => {
+      const f = await fixture({ ambientEnvironment: true });
+      const env = { ...launchEnv, HOME: path.join(f.root, "role-home"), CODEX_HOME: path.join(f.root, "role-codex-home"), SSL_CERT_FILE: "/synthetic/projected-ca" };
+      const spec = { ...f.spec, isolateEnvironment: true };
+      const input = "trusted input\nwith exact EOF";
+      const target = lane === "spawn" ? await buildSshSpawnTarget({ spec, command: process.execPath, args: [f.inspector], env, stdin: input }) : null;
+      try {
+        const result = target ? await executeTarget(target) : await runSshCommand(spec,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)}`, { env, stdin: input });
+        expect(result.stdout).toBe("ready\n");
+        const observed = JSON.parse(await readFile(f.outcome, "utf8"));
+        expect(observed.env).toEqual(env);
+        expect(observed.input).toBe(Buffer.from(input).toString("base64"));
+        expect(await readFile(path.join(f.root, "outer-shell-started"), "utf8")).toContain("before the controlled bootstrap");
+        const transport = JSON.parse(await readFile(f.record, "utf8"));
+        expect(transport.args.at(-1)).not.toContain("/etc/profile");
+        expect(transport.args.at(-1)).not.toContain(".bashrc");
+        for (const text of [JSON.stringify(transport.args), observed.processArgv, result.stdout + result.stderr]) {
+          expect(text).not.toContain("synthetic-secret");
+          expect(text).not.toContain(Buffer.from(marker).toString("base64"));
+        }
+      } finally { await target?.cleanup(); }
+      for (const file of JSON.parse(await readFile(f.record, "utf8")).files) await expect(stat(file.path)).rejects.toThrow();
+    });
+
+    it("preserves an explicitly projected provider key in the isolated stdin channel", async () => {
+      const f = await fixture({ ambientEnvironment: true });
+      const projected = "synthetic-projected-provider-key";
+      await runSshCommand({ ...f.spec, isolateEnvironment: true }, `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)}`,
+        { env: { OPENAI_API_KEY: projected, HOME: "/synthetic/role-home", CODEX_HOME: "/synthetic/role-codex-home" } });
+      const observed = JSON.parse(await readFile(f.outcome, "utf8"));
+      expect(observed.env).toEqual({ OPENAI_API_KEY: projected, HOME: "/synthetic/role-home", CODEX_HOME: "/synthetic/role-codex-home" });
+      expect(JSON.stringify(JSON.parse(await readFile(f.record, "utf8")).args)).not.toContain(projected);
+    });
+
     it.each([
       undefined,
       "",

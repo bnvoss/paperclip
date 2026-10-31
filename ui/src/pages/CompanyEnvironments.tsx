@@ -76,6 +76,7 @@ type EnvironmentFormState = {
   sshPrivateKeySecretId: string;
   sshKnownHosts: string;
   sshStrictHostKeyChecking: boolean;
+  sshTrustedManagement: boolean;
   sandboxProvider: string;
   sandboxConfig: Record<string, unknown>;
   envVars: Record<string, EnvBinding>;
@@ -132,6 +133,7 @@ function buildEnvironmentPayload(form: EnvironmentFormState) {
                 : { type: "secret_ref" as const, secretId: form.sshPrivateKeySecretId, version: "latest" as const },
             knownHosts: form.sshKnownHosts.trim() || null,
             strictHostKeyChecking: form.sshStrictHostKeyChecking,
+            trustedManagement: form.sshTrustedManagement,
           }
         : form.driver === "sandbox"
           ? {
@@ -155,6 +157,7 @@ function createEmptyEnvironmentForm(): EnvironmentFormState {
     sshPrivateKeySecretId: "",
     sshKnownHosts: "",
     sshStrictHostKeyChecking: true,
+    sshTrustedManagement: false,
     sandboxProvider: "",
     sandboxConfig: {},
     envVars: {},
@@ -196,6 +199,7 @@ function readSshConfig(environment: Environment) {
         ? String((config.privateKeySecretRef as { secretId: string }).secretId)
         : "",
     knownHosts: typeof config.knownHosts === "string" ? config.knownHosts : "",
+    trustedManagement: config.trustedManagement === true,
     strictHostKeyChecking:
       typeof config.strictHostKeyChecking === "boolean"
         ? config.strictHostKeyChecking
@@ -230,6 +234,7 @@ function createEnvironmentFormFromEnvironment(environment: Environment): Environ
       sshPrivateKeySecretId: ssh.privateKeySecretId,
       sshKnownHosts: ssh.knownHosts,
       sshStrictHostKeyChecking: ssh.strictHostKeyChecking,
+      sshTrustedManagement: ssh.trustedManagement,
       envVars: environment.envVars ?? {},
     };
   }
@@ -2350,6 +2355,18 @@ export function CompanyEnvironments({ mode = "list" }: CompanyEnvironmentsProps)
                       onChange={(checked) =>
                         setEnvironmentForm((current) => ({ ...current, sshStrictHostKeyChecking: checked }))}
                     />
+                  </div>
+                  <div className="md:col-span-2">
+                    <ToggleField
+                      label="Trusted host management"
+                      toggleTestId="ssh-trusted-management"
+                      checked={environmentForm.sshTrustedManagement}
+                      onChange={(checked) => setEnvironmentForm((current) => ({ ...current, sshTrustedManagement: checked }))}
+                    />
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Allow native Codex Runner to manage this host with the SSH account's privileges.
+                      Applies to every role using this environment. Stop active work separately when revoking access.
+                    </p>
                   </div>
                 </div>
               ) : null}

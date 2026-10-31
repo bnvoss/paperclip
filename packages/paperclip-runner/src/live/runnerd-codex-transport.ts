@@ -415,6 +415,27 @@ async function rotateExternalAuthorityEpoch(
   return controlPlaneState;
 }
 
+/** A saved template cannot authorize a broader or different current target. */
+export function assertSavedRunnerdExecutionProfile(options: Pick<RunnerdCodexTransportOptions,
+  "provider" | "executionTargetFingerprint" | "trustedSshManagement" | "externallySandboxed">,
+  state: { runAttachTemplate?: unknown; commands?: unknown }): void {
+  if (options.provider && !["codex", "opencode"].includes(options.provider)) return;
+  const commands = Array.isArray(state.commands) ? state.commands.map(record) : [];
+  const seed = state.runAttachTemplate ?? [...commands].reverse().find(command =>
+    ["run.prepare", "run.attach"].includes(String(command.type)) && record(command.payload).provider !== undefined)?.payload;
+  const provider = record(record(seed).provider);
+  const savedFingerprint = typeof provider.executionTargetFingerprint === "string" ? provider.executionTargetFingerprint : null;
+  const expectedFingerprint = options.executionTargetFingerprint ?? null;
+  // Preserve legacy Local behavior. A bound remote/trusted profile requires
+  // exact identity, including downgrade, before connecting to a retained owner.
+  if (expectedFingerprint === null && savedFingerprint === null && provider.trustedSshManagement !== true && !options.trustedSshManagement) return;
+  if (savedFingerprint !== expectedFingerprint || provider.provider !== (options.provider ?? "codex")
+    || (provider.trustedSshManagement === true) !== (options.trustedSshManagement === true)
+    || (provider.externallySandboxed === true) !== ((options.provider ?? "codex") === "codex" && options.externallySandboxed === true)) {
+    throw new Error("runner_execution_target_profile_mismatch");
+  }
+}
+
 function rotatedRunAttachPayload(
   state: { commands?: unknown; runAttachTemplate?: unknown },
   desired: DurableRecoveryIdentity,
@@ -1168,6 +1189,10 @@ export interface CapabilityRunnerdCodexTransportOptions {
    * runtimes such as Daytona intentionally omit nested namespace privileges.
    */
   externallySandboxed?: boolean;
+  /** Admitted only by the controller from the saved, admin-owned SSH environment. */
+  trustedSshManagement?: boolean;
+  /** Controller-resolved target and permission identity, immutable on restore. */
+  executionTargetFingerprint?: string | null;
   /** Current run's authority catalog, used when a suspended session is rebound. */
   resumeDynamicTools?: readonly Readonly<Record<string, unknown>>[];
   /** Current run's completion authority, rebound without changing provider identity. */
@@ -2357,7 +2382,8 @@ async function settleRetainedRunnerdSessionOwned(
       context: null,
       codexHome,
       sourceCodexHome:
-        input.sourceCodexHome ?? resolveSourceCodexHome(input.environment),
+        resolveRunnerdCodexSourceHome({ sourceCodexHome: input.sourceCodexHome, environment: input.environment,
+          trustedSshManagement: record(initial.provider.config).trustedSshManagement === true }),
       apiKey:
         input.environment?.CODEX_API_KEY ?? input.environment?.OPENAI_API_KEY,
     }),
@@ -2551,7 +2577,9 @@ async function settleRetainedRunnerdSessionOwned(
         runnerDigest: artifact.digest,
         environment: createCapabilityRunnerdProviderEnvironment({
           provider: "codex",
-          options: { environment: input.environment },
+          options: { environment: input.environment,
+            executionTargetFingerprint: typeof record(before.provider.config).executionTargetFingerprint === "string"
+              ? String(record(before.provider.config).executionTargetFingerprint) : null },
           identity: input.identity,
           codexHome,
           runtimeContextPath: resolve(root, "runtime-context.json"),
@@ -3119,6 +3147,7 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
   acpxSidecarPath?: string;
 }): NodeJS.ProcessEnv {
   const commonIdentity = {
+    PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT: input.options.executionTargetFingerprint ?? "",
     PAPERCLIP_RUNNER_INSTANCE_ID: input.identity.runnerInstanceId,
     PAPERCLIP_RUN_ID: input.identity.runId,
     PAPERCLIP_NORMALIZED_SESSION_ID: input.identity.normalizedSessionId,
@@ -3201,6 +3230,8 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
     const apiKey = input.options.environment?.[key];
     if (apiKey?.trim()) environment[key] = apiKey;
   }
+  // A compatibility fence, never a privilege grant. Overwrite configured data.
+  environment.PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT = input.options.executionTargetFingerprint ?? "";
   return environment;
 }
 
@@ -3264,6 +3295,12 @@ export function resolveSourceCodexHome(
   return home ? resolve(home, ".codex") : null;
 }
 
+/** A trusted host run may copy only the separately projected credential home. */
+export function resolveRunnerdCodexSourceHome(options: Pick<CapabilityRunnerdCodexTransportOptions,
+  "sourceCodexHome" | "environment" | "trustedSshManagement">): string | null {
+  return options.sourceCodexHome ?? (options.trustedSshManagement ? null : resolveSourceCodexHome(options.environment));
+}
+
 export function trustedRuntimeReadOnlyRoots(
   environment: NodeJS.ProcessEnv | undefined,
 ): string[] {
@@ -3289,7 +3326,12 @@ export function createRunnerdCodexAppServerArgs(input: {
   codexCommand?: string;
   readOnlyRoots?: string[];
   instructionWorkingCopyRoot?: string;
+  externallySandboxed?: boolean;
+  trustedSshManagement?: boolean;
 }): string[] {
+  if (input.externallySandboxed && input.trustedSshManagement) {
+    throw new Error("conflicting_codex_execution_permissions");
+  }
   // The filesystem policy denies HOME and CODEX_HOME to keep credentials and
   // runner state outside provider reach. Always bind those names to the actual
   // isolated runner home; a stale controller environment must never cause the
@@ -3302,6 +3344,8 @@ export function createRunnerdCodexAppServerArgs(input: {
     },
     [...(input.readOnlyRoots ?? []), ...codexExecutableReadOnlyRoots(input.environment ?? {}, input.codexCommand)],
     input.instructionWorkingCopyRoot,
+    input.trustedSshManagement ? "trusted-ssh-management"
+      : input.externallySandboxed ? "external-sandbox" : "workspace",
   );
 }
 
@@ -3893,6 +3937,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             this.#authorizedTools,
             this.options.resumeCompletionContract,
           );
+      assertSavedRunnerdExecutionProfile(this.options, { runAttachTemplate });
       this.#runAttachTemplate = structuredClone(runAttachTemplate);
       const payload = {
         ...runAttachTemplate,
@@ -4484,8 +4529,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
         sourceCodexHome:
-          this.options.sourceCodexHome ??
-          resolveSourceCodexHome(this.options.environment),
+          resolveRunnerdCodexSourceHome(this.options),
         apiKey:
           this.options.environment?.CODEX_API_KEY ??
           this.options.environment?.OPENAI_API_KEY,
@@ -4717,6 +4761,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                         createRunnerdCodexAppServerArgs({
                           environment: this.options.environment,
                           codexHome,
+                          externallySandboxed: this.options.externallySandboxed,
+                          trustedSshManagement: this.options.trustedSshManagement,
                           codexCommand: this.options.codexCommand,
                           instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
                           readOnlyRoots: [
@@ -4744,6 +4790,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                   externallySandboxed:
                     provider === "codex" &&
                     this.options.externallySandboxed === true,
+                  trustedSshManagement: provider === "codex" && this.options.trustedSshManagement === true,
+                  executionTargetFingerprint: this.options.executionTargetFingerprint ?? null,
                   instructions:
                     provider === "codex"
                       ? withCodexCollaborationRuntimeInstructions(
@@ -4905,6 +4953,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       }
       throw error;
     }
+    if (controlPlaneState) assertSavedRunnerdExecutionProfile(this.options, controlPlaneState);
     let identity = controlPlaneState
       ? controlPlaneIdentity(controlPlaneState)
       : desiredIdentity;
@@ -5028,6 +5077,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       if (!archivedState) {
         throw new Error("PRP provider resume state is unavailable");
       }
+      assertSavedRunnerdExecutionProfile(this.options, archivedState);
       if (localStateOwner) {
         try {
           controlPlaneState = rotateLocalAuthorityEpoch(
@@ -5196,6 +5246,8 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           createRunnerdCodexAppServerArgs({
             environment: this.options.environment,
             codexHome,
+            externallySandboxed: this.options.externallySandboxed,
+            trustedSshManagement: this.options.trustedSshManagement,
             codexCommand: this.options.codexCommand,
             instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
             readOnlyRoots: [
@@ -5374,8 +5426,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
         sourceCodexHome:
-          this.options.sourceCodexHome ??
-          resolveSourceCodexHome(this.options.environment),
+          resolveRunnerdCodexSourceHome(this.options),
         apiKey:
           this.options.environment?.CODEX_API_KEY ??
           this.options.environment?.OPENAI_API_KEY,

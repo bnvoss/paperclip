@@ -56,6 +56,7 @@ export function createNativeSessionBackend(
       dynamicTools: options.dynamicTools,
       dynamicToolHandler: options.dynamicToolHandler,
       environment: options.environment,
+      permissionMode: options.permissionMode,
       workingDirectoryAuthority: options.workingDirectoryAuthority,
       transportFactory: options.codexTransportFactory,
     });
@@ -108,6 +109,7 @@ export function createNativeSessionBackend(
     dynamicTools: options.dynamicTools,
     dynamicToolHandler: options.dynamicToolHandler,
     environment: options.environment,
+    permissionMode: options.permissionMode,
     workingDirectoryAuthority: options.workingDirectoryAuthority,
     transportFactory: options.codexTransportFactory,
   });

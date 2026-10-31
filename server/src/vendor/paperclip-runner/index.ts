@@ -132,3 +132,5 @@ export const nativeRestartInterruptedTurnId = runner.nativeRestartInterruptedTur
 
 export const completeTerminatedRemoteNativeSessionCleanup = runner.completeTerminatedRemoteNativeSessionCleanup;
 export const completeTerminatedLocalNativeSessionCleanup = runner.completeTerminatedLocalNativeSessionCleanup;
+
+export const CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE = runner.CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE;

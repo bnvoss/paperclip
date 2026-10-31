@@ -284,6 +284,7 @@ export class CodexAppServerDriver implements HarnessDriver {
             this.#options.includeCollaborationModeInstructions ?? true,
             this.#options.includeSkillInstructions ?? false,
             this.#options.environment,
+            this.#options.permissionMode,
           ),
           approvalPolicy: this.#options.approvalPolicy ?? "never",
           ...(this.#options.model ? { model: this.#options.model } : {}),
@@ -417,6 +418,7 @@ export class CodexAppServerDriver implements HarnessDriver {
             this.#options.includeCollaborationModeInstructions ?? true,
             this.#options.includeSkillInstructions ?? false,
             this.#options.environment,
+            this.#options.permissionMode,
           ),
           ...this.#instructionParams(this.#direct() ? "" : this.#baseInstructions()),
           approvalPolicy: this.#options.approvalPolicy ?? "never",
@@ -676,7 +678,7 @@ export class CodexAppServerDriver implements HarnessDriver {
       this.#options.transportFactory?.(context) ??
       new ProcessCodexAppServerTransport({
         workingDirectory,
-        args: createIsolatedCodexAppServerArgs(this.#options.environment, codexExecutableReadOnlyRoots(this.#options.environment ?? process.env), this.#options.instructionWorkingCopyRoot),
+        args: createIsolatedCodexAppServerArgs(this.#options.environment, codexExecutableReadOnlyRoots(this.#options.environment ?? process.env), this.#options.instructionWorkingCopyRoot, this.#options.permissionMode),
         environment: createSanitizedCodexEnvironment(this.#options.environment),
         onDiagnostic: this.#options.onDiagnostic,
         processGroup: true,
@@ -821,7 +823,7 @@ export class CodexAppServerDriver implements HarnessDriver {
     const permissionProfileId = text(activePermissionProfile.id);
     const requestedMode = this.#options.requestedCollaborationMode ?? "default";
     const requiredPermissionProfile =
-      text(createSecuredCodexThreadParams(workingDirectory, requestedMode, true, false, this.#options.environment).permissions);
+      text(createSecuredCodexThreadParams(workingDirectory, requestedMode, true, false, this.#options.environment, this.#options.permissionMode).permissions);
     if (
       permissionProfileId.length > 0 &&
       permissionProfileId !== requiredPermissionProfile

@@ -1484,6 +1484,7 @@ pub struct CodexCommandExecutor {
     provider: Option<CodexProvider>,
     event_identity: Option<ProviderEventIdentity>,
     restore_checked: bool,
+    execution_target_fingerprint: Option<String>,
     restore_error: Option<DurableRunnerError>,
     opencode_launch_profile: Option<OpenCodeLaunchProfile>,
     startup_command: Option<ProviderStartupCommand>,
@@ -1498,6 +1499,13 @@ impl CodexCommandExecutor {
             provider: None,
             event_identity: None,
             restore_checked: false,
+            // Launch-bound compatibility only; this cannot grant a permission
+            // profile. The authenticated controller owns the structured config.
+            execution_target_fingerprint: std::env::var(
+                "PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT",
+            )
+            .ok()
+            .filter(|value| !value.is_empty()),
             restore_error: None,
             opencode_launch_profile: None,
             startup_command: None,
@@ -1510,6 +1518,18 @@ impl CodexCommandExecutor {
         executor.event_identity = Some(ProviderEventIdentity::from_config(config));
         executor.opencode_launch_profile = config.opencode_launch_profile.clone();
         executor
+    }
+
+    fn assert_execution_target_profile(
+        &self,
+        config: &CodexProviderConfig,
+    ) -> Result<(), DurableRunnerError> {
+        if config.execution_target_fingerprint != self.execution_target_fingerprint {
+            return Err(DurableRunnerError::invalid(
+                "runner execution target profile changed before provider recovery",
+            ));
+        }
+        Ok(())
     }
 
     fn bind_opencode_launch_profile(
@@ -1770,6 +1790,9 @@ impl CodexCommandExecutor {
             ))
         })?;
         state.validate()?;
+        // This check precedes restore_provider_if_needed: a rejected downgrade
+        // must not first respawn the old broader provider.
+        self.assert_execution_target_profile(&state.config)?;
         let expected_launch_profile_digest = self.bind_opencode_launch_profile(&state.config)?;
         if state.opencode_launch_profile_digest != expected_launch_profile_digest {
             return Err(DurableRunnerError::invalid(
@@ -2229,6 +2252,7 @@ impl CodexCommandExecutor {
         config
             .validate()
             .map_err(|error| DurableRunnerError::invalid(error.to_string()))?;
+        self.assert_execution_target_profile(&config)?;
         let provider_name = config.provider.clone();
         let driver = config.driver.clone();
         let opencode_launch_profile_digest = self.bind_opencode_launch_profile(&config)?;
@@ -4957,6 +4981,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5319,6 +5345,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5410,6 +5438,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5463,6 +5493,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5506,6 +5538,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5598,6 +5632,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5665,6 +5701,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5715,6 +5753,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5839,6 +5879,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -5951,6 +5993,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6008,6 +6052,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6129,6 +6175,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6170,6 +6218,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6208,6 +6258,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },
@@ -6285,6 +6337,8 @@ mod tests {
                 instructions: String::new(),
                 approval_policy: "never".to_owned(),
                 externally_sandboxed: false,
+                trusted_ssh_management: false,
+                execution_target_fingerprint: None,
                 include_skill_instructions: None,
                 conversation_mode: None,
             },

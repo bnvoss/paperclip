@@ -7,6 +7,7 @@ import {
   cleanupGitHubOperationLaunchers,
   prepareGitHubOperationLaunchers,
   adapterExecutionTargetUsesManagedHome,
+  adapterExecutionTargetToRemoteSpec,
   ensureAdapterExecutionTargetRuntimeCommandInstalled,
   resolveAdapterExecutionTargetCwd,
   runAdapterExecutionTargetProcess,
@@ -17,6 +18,16 @@ describe("runAdapterExecutionTargetShellCommand", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+  });
+
+  it.each([false, true])("projects the admitted trusted SSH bootstrap without changing ordinary SSH (%s)", async trustedManagement => {
+    const run = vi.spyOn(ssh, "runSshCommand").mockResolvedValue({ stdout: "", stderr: "" });
+    const target = { kind: "remote" as const, transport: "ssh" as const, trustedManagement, remoteCwd: "/synthetic/work",
+      spec: { host: "synthetic.invalid", port: 22, username: "synthetic", remoteCwd: "/synthetic/work",
+        remoteWorkspacePath: "/synthetic/work", privateKey: null, knownHosts: null, strictHostKeyChecking: true } };
+    await runAdapterExecutionTargetShellCommand("synthetic", target, "printf ready", { cwd: "/synthetic/work", env: {} });
+    expect(run.mock.calls[0]![0].isolateEnvironment === true).toBe(trustedManagement);
+    expect(adapterExecutionTargetToRemoteSpec(target)?.isolateEnvironment === true).toBe(trustedManagement);
   });
 
   it("quotes remote shell commands with the shared SSH quoting helper", async () => {

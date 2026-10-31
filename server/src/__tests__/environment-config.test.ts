@@ -33,6 +33,7 @@ describe("environment config helpers", () => {
       },
       knownHosts: null,
       strictHostKeyChecking: true,
+      trustedManagement: false,
     });
   });
 
@@ -101,6 +102,7 @@ describe("environment config helpers", () => {
         privateKeySecretRef: null,
         knownHosts: null,
         strictHostKeyChecking: false,
+        trustedManagement: false,
       },
     });
   });
@@ -287,4 +289,11 @@ describe("environment config helpers", () => {
       },
     });
   });
+});
+
+
+it("admits only a literal boolean SSH trusted-management opt-in", () => {
+  const config = { host: "ssh.example.test", username: "operator", remoteWorkspacePath: "/srv/workspace" };
+  expect(normalizeEnvironmentConfig({ driver: "ssh", config: { ...config, trustedManagement: true } })).toMatchObject({ trustedManagement: true });
+  expect(() => normalizeEnvironmentConfig({ driver: "ssh", config: { ...config, trustedManagement: "true" } })).toThrow();
 });

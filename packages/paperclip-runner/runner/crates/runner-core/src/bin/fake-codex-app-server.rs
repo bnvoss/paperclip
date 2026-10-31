@@ -685,6 +685,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let require_completion_contract = args
         .iter()
         .any(|value| value == "--require-completion-contract");
+    let expected_permission_profile = argument(&args, "--require-permission-profile");
     let require_external_sandbox = args
         .iter()
         .any(|value| value == "--require-external-sandbox");
@@ -1007,6 +1008,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             && message.pointer("/params/config/skills.include_instructions") != Some(&json!(true))
         {
             return Err("thread request omitted skills.include_instructions=true".into());
+        }
+        if let Some(expected) = expected_permission_profile.as_ref() {
+            if matches!(method, "thread/start" | "thread/resume" | "turn/start")
+                && (message.pointer("/params/permissions") != Some(&json!(expected))
+                    || message.pointer("/params/sandbox").is_some()
+                    || message.pointer("/params/sandboxPolicy").is_some())
+            {
+                return Err("provider request omitted the exact named permission profile or claimed an external sandbox".into());
+            }
         }
         let id = message.get("id").cloned();
         match method {

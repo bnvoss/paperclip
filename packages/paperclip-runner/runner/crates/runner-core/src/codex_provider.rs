@@ -353,6 +353,10 @@ pub struct CodexProviderConfig {
     pub approval_policy: String,
     #[serde(default)]
     pub externally_sandboxed: bool,
+    #[serde(default)]
+    pub trusted_ssh_management: bool,
+    #[serde(default)]
+    pub execution_target_fingerprint: Option<String>,
     // Older persisted configurations deliberately retain the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_skill_instructions: Option<bool>,
@@ -431,6 +435,31 @@ impl CodexProviderConfig {
         if self.externally_sandboxed && self.provider != "codex" {
             return Err(LocalRunnerError::invalid(
                 "external sandbox delegation is only supported by the Codex provider",
+            ));
+        }
+        if self.trusted_ssh_management && (self.provider != "codex" || self.externally_sandboxed) {
+            return Err(LocalRunnerError::invalid(
+                "trusted SSH management requires Codex without external sandbox delegation",
+            ));
+        }
+        if self.trusted_ssh_management && self.execution_target_fingerprint.is_none() {
+            return Err(LocalRunnerError::invalid(
+                "trusted SSH management requires a target fingerprint",
+            ));
+        }
+        if self
+            .execution_target_fingerprint
+            .as_ref()
+            .is_some_and(|fingerprint| {
+                !fingerprint.starts_with("sha256:")
+                    || fingerprint.len() != 71
+                    || !fingerprint[7..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+        {
+            return Err(LocalRunnerError::invalid(
+                "invalid execution target fingerprint",
             ));
         }
         if self.command.as_os_str().is_empty() {
@@ -791,15 +820,16 @@ const GITHUB_CREDENTIAL_ENVIRONMENT_KEYS: &[&str] = &[
     "GIT_CONFIG_VALUE_31",
 ];
 
-const CODEX_PROVIDER_ENVIRONMENT_KEYS: &[&str] = &[
-    "CODEX_HOME",
-    "OPENAI_API_KEY",
-    "CODEX_API_KEY",
-    "PAPERCLIP_RUNNER_EXTERNAL_SANDBOX",
-];
+const CODEX_PROVIDER_ENVIRONMENT_KEYS: &[&str] = &["CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY"];
 
-fn codex_permission_profile(provider: &str, external_sandbox: bool) -> &'static str {
-    if provider == "codex" && external_sandbox {
+fn codex_permission_profile(
+    provider: &str,
+    external_sandbox: bool,
+    trusted_ssh_management: bool,
+) -> &'static str {
+    if provider == "codex" && trusted_ssh_management {
+        "paperclip-runner-trusted-ssh-management-v1"
+    } else if provider == "codex" && external_sandbox {
         "paperclip-runner-external-sandbox"
     } else {
         "paperclip-runner-workspace-only"
@@ -881,8 +911,8 @@ impl CodexProvider {
         let authorized_tools = authorized_tools.into_iter().collect::<Vec<_>>();
         let permission_profile = codex_permission_profile(
             &config.provider,
-            config.externally_sandboxed
-                || std::env::var("PAPERCLIP_RUNNER_EXTERNAL_SANDBOX").as_deref() == Ok("1"),
+            config.externally_sandboxed,
+            config.trusted_ssh_management,
         );
         let (dynamic_tools, authorized_tool_ids) =
             codex_dynamic_tools(authorized_tools.iter().cloned())?;
@@ -4055,6 +4085,8 @@ done
             instructions: "Test only.".to_owned(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            trusted_ssh_management: false,
+            execution_target_fingerprint: None,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4442,6 +4474,8 @@ done
             instructions: String::new(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            trusted_ssh_management: false,
+            execution_target_fingerprint: None,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4562,6 +4596,8 @@ done
             instructions: String::new(),
             approval_policy: "never".to_owned(),
             externally_sandboxed: false,
+            trusted_ssh_management: false,
+            execution_target_fingerprint: None,
             include_skill_instructions: None,
             conversation_mode: None,
         };
@@ -4625,18 +4661,22 @@ done
 
     #[test]
     fn codex_provider_accepts_only_the_controller_derived_external_sandbox_bit() {
-        assert!(CODEX_PROVIDER_ENVIRONMENT_KEYS.contains(&"PAPERCLIP_RUNNER_EXTERNAL_SANDBOX"));
+        assert!(!CODEX_PROVIDER_ENVIRONMENT_KEYS.contains(&"PAPERCLIP_RUNNER_EXTERNAL_SANDBOX"));
         assert!(!CODEX_PROVIDER_ENVIRONMENT_KEYS.contains(&"PAPERCLIP_SANDBOX_MODE"));
         assert_eq!(
-            codex_permission_profile("codex", true),
+            codex_permission_profile("codex", true, false),
             "paperclip-runner-external-sandbox"
         );
         assert_eq!(
-            codex_permission_profile("codex", false),
+            codex_permission_profile("codex", false, false),
             "paperclip-runner-workspace-only"
         );
         assert_eq!(
-            codex_permission_profile("opencode", true),
+            codex_permission_profile("codex", false, true),
+            "paperclip-runner-trusted-ssh-management-v1"
+        );
+        assert_eq!(
+            codex_permission_profile("opencode", true, false),
             "paperclip-runner-workspace-only"
         );
     }

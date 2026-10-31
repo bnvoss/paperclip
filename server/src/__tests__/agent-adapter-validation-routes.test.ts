@@ -432,6 +432,47 @@ describe("agent routes adapter validation", () => {
     expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
   });
 
+  it.each([agentActor, nonAdminBoard])("protects effective provider changes of a trusted SSH role (%j)", async actor => {
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig: { provider: "codex", codexPermissionMode: "never" }, defaultEnvironmentId: sshId });
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: { trustedManagement: true } });
+    const app = await createApp(actor);
+    const response = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ adapterConfig: { provider: "opencode", model: "vendor/model" } }));
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
+  });
+
+  it("keeps normal owner improvements and unchanged launch authority on the existing consent/configuration path", async () => {
+    const adapterConfig = { provider: "codex", codexPermissionMode: "never", workspaceStrategy: { type: "git_worktree", runtimeProvisionCommand: "printf synthetic" } };
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig, defaultEnvironmentId: sshId });
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: { trustedManagement: true } });
+    const app = await createApp(agentActor);
+    for (const body of [{ adapterConfig: { provider: "codex", codexPermissionMode: "never", model: "improved-model", modelReasoningEffort: "max" } }, { runtimeConfig: { heartbeat: { enabled: true } } }, { desiredSkills: [] }]) {
+      const response = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send(body));
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+    }
+    mockAgentInstructionsService.updateBundle.mockResolvedValue({ bundle: {}, adapterConfig });
+    const instructions = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111/instructions-bundle").send({ mode: "managed" }));
+    expect(instructions.status, JSON.stringify(instructions.body)).toBe(200);
+    expect(mockAgentInstructionsService.updateBundle).toHaveBeenCalledOnce();
+  });
+
+  it("compares effective hooks for merge, replacement and unchanged payloads", async () => {
+    const adapterConfig = { provider: "codex", codexPermissionMode: "never", workspaceStrategy: { type: "git_worktree", runtimeProvisionCommand: "printf original" } };
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig, defaultEnvironmentId: sshId });
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: { trustedManagement: true } });
+    const app = await createApp(nonAdminBoard);
+    for (const body of [{ adapterConfig: { workspaceStrategy: { type: "git_worktree", runtimeProvisionCommand: "printf changed" } } }, { replaceAdapterConfig: true, adapterConfig: { provider: "codex" } }]) {
+      const response = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send(body));
+      expect(response.status, JSON.stringify(response.body)).toBe(403);
+    }
+    const same = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ adapterConfig }));
+    expect(same.status, JSON.stringify(same.body)).toBe(200);
+    const admin = await createApp({ source: "session", isInstanceAdmin: true });
+    const changed = await requestApp(admin, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ adapterConfig: { workspaceStrategy: { type: "git_worktree", runtimeProvisionCommand: "printf approved" } } }));
+    expect(changed.status, JSON.stringify(changed.body)).toBe(200);
+  });
+
   it("selects and refreshes the runner provider catalog independently", async () => {
     const adapters = await import("../adapters/index.js");
     const list = vi.spyOn(adapters, "listAdapterModels").mockImplementation(async (type) => [{ id: type, label: type }]);

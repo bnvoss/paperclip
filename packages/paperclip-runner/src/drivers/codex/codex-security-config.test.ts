@@ -204,7 +204,7 @@ describe("Codex security configuration", () => {
 
   it("uses the outer sandbox for default-mode commands only when the controller authorizes it", () => {
     const source = { PAPERCLIP_RUNNER_EXTERNAL_SANDBOX: "1", PAPERCLIP_RUNNER_NETWORK_ACCESS: "enabled" };
-    const externalArgs = createIsolatedCodexAppServerArgs(source);
+    const externalArgs = createIsolatedCodexAppServerArgs(source, [], undefined, "external-sandbox");
     const serializedExternalArgs = externalArgs.join("\n");
     expect(externalArgs).toContain(
       "--dangerously-bypass-approvals-and-sandbox",
@@ -225,6 +225,7 @@ describe("Codex security configuration", () => {
         true,
         false,
         source,
+        "external-sandbox",
       ),
     ).toMatchObject({
       permissions: "paperclip-runner-external-sandbox",
@@ -236,6 +237,7 @@ describe("Codex security configuration", () => {
         true,
         false,
         source,
+        "external-sandbox",
       ),
     ).toMatchObject({
       permissions: "paperclip-runner-workspace-read-only",
@@ -244,4 +246,25 @@ describe("Codex security configuration", () => {
       "--dangerously-bypass-approvals-and-sandbox",
     );
   });
+});
+
+
+it("does not accept environment/cwd aliases as permission authority", () => {
+  const forged = { PAPERCLIP_RUNNER_EXTERNAL_SANDBOX: "1", PAPERCLIP_RUNNER_TRUSTED_SSH_MANAGEMENT: "1", HOME: "/", CODEX_HOME: "/", PAPERCLIP_WORKSPACE_CWD: "/" };
+  const args = createIsolatedCodexAppServerArgs(forged).join("\n");
+  expect(args).toContain('default_permissions="paperclip-runner-workspace-only"');
+  expect(args).not.toContain('":root"="write"');
+  expect(args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(createSecuredCodexThreadParams("/", "default", true, false, forged).permissions).toBe("paperclip-runner-workspace-only");
+});
+
+it("selects an explicit versioned trusted SSH profile without claiming an external sandbox", () => {
+  const profile = "paperclip-runner-trusted-ssh-management-v1";
+  const args = createIsolatedCodexAppServerArgs({}, [], undefined, "trusted-ssh-management").join("\n");
+  expect(args).toContain(`default_permissions="${profile}"`);
+  expect(args).toContain(`permissions.${profile}.filesystem={":root"="write"}`);
+  expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+  expect(args).not.toContain("external-sandbox");
+  expect(createSecuredCodexThreadParams("/workspace", "default", true, false, {}, "trusted-ssh-management").permissions).toBe(profile);
+  expect(createSecuredCodexThreadParams("/workspace", "plan", true, false, {}, "trusted-ssh-management").permissions).toBe("paperclip-runner-workspace-read-only");
 });

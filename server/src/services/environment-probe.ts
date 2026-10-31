@@ -184,7 +184,9 @@ export async function probeEnvironment(
   }
 
   try {
-    const { remoteCwd } = await ensureSshWorkspaceReady(parsed.config);
+    const { remoteCwd } = await ensureSshWorkspaceReady({
+      ...parsed.config, isolateEnvironment: parsed.config.trustedManagement === true,
+    });
 
     return {
       ok: true,

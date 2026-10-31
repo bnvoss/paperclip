@@ -1192,7 +1192,9 @@ function createSshEnvironmentDriver(db: Db): EnvironmentRuntimeDriver {
         throw new Error(`Expected SSH environment config for driver "${input.environment.driver}".`);
       }
 
-      const { remoteCwd } = await ensureSshWorkspaceReady(parsed.config);
+      const { remoteCwd } = await ensureSshWorkspaceReady({
+        ...parsed.config, isolateEnvironment: parsed.config.trustedManagement === true,
+      });
       return await environmentsSvc.acquireLease({
         companyId: input.companyId,
         environmentId: input.environment.id,
