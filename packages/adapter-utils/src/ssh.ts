@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Transform } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
 import type { CommandManagedRuntimeRunner } from "./command-managed-runtime.js";
 import {
   createUnrelatedHistoryGraftCommit,
@@ -274,6 +275,10 @@ async function spawnText(
     const maxBuffer = options.maxBuffer ?? 1024 * 128;
     let stdout = "";
     let stderr = "";
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
     let timedOut = false;
     let processFailure: Error | null = null;
@@ -292,13 +297,15 @@ async function spawnText(
       chunk: unknown,
     ) => {
       if (processFailure) return;
-      const text = String(chunk);
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
       if (streamName === "stdout") {
-        stdout += text;
+        stdoutBytes += bytes.length;
+        stdout += stdoutDecoder.write(bytes);
       } else {
-        stderr += text;
+        stderrBytes += bytes.length;
+        stderr += stderrDecoder.write(bytes);
       }
-      if (Buffer.byteLength(stdout, "utf8") > maxBuffer || Buffer.byteLength(stderr, "utf8") > maxBuffer) {
+      if (stdoutBytes > maxBuffer || stderrBytes > maxBuffer) {
         processFailure = new Error(`Process output exceeded maxBuffer of ${maxBuffer} bytes.`);
         stopChild();
       }
@@ -330,6 +337,12 @@ async function spawnText(
     });
     child.stderr?.on("data", (chunk) => {
       append("stderr", chunk);
+    });
+    child.stdout?.on("end", () => {
+      stdout += stdoutDecoder.end();
+    });
+    child.stderr?.on("end", () => {
+      stderr += stderrDecoder.end();
     });
 
     child.on("error", (error) => {
