@@ -139,7 +139,7 @@ describe("codex remote environment diagnostics", () => {
     }
   });
 
-  it("stages managed CODEX_HOME in an isolated runtime dir and keeps the probe cwd on the original remote workspace", async () => {
+  it.each([false, true])("stages curated remote homes without changing the probe cwd (managed AI connection: %s)", async (managedAiConnection) => {
     const remoteTarget: AdapterExecutionTarget = {
       kind: "remote",
       transport: "ssh",
@@ -162,6 +162,12 @@ describe("codex remote environment diagnostics", () => {
       config: {
         engine: "cli",
         command: "codex",
+        managedAiConnection: managedAiConnection ? { provider: "openai", method: "subscription" } : undefined,
+        env: {
+          HOME: "/synthetic/controller-home",
+          XDG_CONFIG_HOME: "/synthetic/controller-home/config",
+          XDG_DATA_HOME: "/synthetic/controller-home/data",
+        },
       },
       executionTarget: remoteTarget,
       environmentName: "QA SSH",
@@ -208,6 +214,12 @@ describe("codex remote environment diagnostics", () => {
         CODEX_HOME: "/remote/workspace/.paperclip-runtime/runs/test/workspace/.paperclip-runtime/codex/home",
       }),
     });
+    const home = managedAiConnection
+      ? "/remote/workspace/.paperclip-runtime/runs/test/workspace/.paperclip-runtime/codex/home"
+      : "/synthetic/controller-home";
+    expect(probeCall?.[4].env.HOME).toBe(home);
+    expect(probeCall?.[4].env.XDG_CONFIG_HOME).toBe(`${home}/config`);
+    expect(probeCall?.[4].env.XDG_DATA_HOME).toBe(`${home}/data`);
     expect(restoreWorkspace).toHaveBeenCalledTimes(1);
   });
 

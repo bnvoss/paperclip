@@ -830,6 +830,11 @@ user, and host-key policy in the SSH environment itself. A connection without an
 explicit private key retains its existing SSH configuration and authentication
 mode.
 
+For Codex runs with a managed AI connection, the curated remote home asset also
+supplies HOME and the managed XDG/provider home paths. Controller temporary
+credential-wrapper paths are not remote home paths. Explicit unmanaged home
+overrides retain their existing behavior.
+
 These launch changes do not add remote process ownership or recovery. An SSH
 client exit, timeout, or disconnect alone does not prove that a remote provider
 or its descendants stopped.
