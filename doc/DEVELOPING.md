@@ -809,6 +809,31 @@ If the `codex` CLI is not installed or not on `PATH`, `codex_local` agent runs f
 
 Local adapters require their corresponding CLI/session setup on the machine running Paperclip. External adapters are installed through the adapter/plugin flow and should not require hardcoded imports in `server/` or `ui/`.
 
+### SSH launch environment
+
+SSH process and control-command launches send environment values in a private
+stdin header. The remote shell reads the header, decodes it through stdin, and
+exports the values with shell builtins. Values do not appear in the SSH command
+arguments or in an `env KEY=value` child process. The remaining stdin is the
+program's original input, including an empty input or EOF. The confidential
+header is internal transport data; it must not be saved as prompt metadata.
+The target needs a POSIX shell and `base64 -d`. Login profiles still supply PATH,
+but cannot read the input header. Profile-enabled tracing is disabled before
+the environment is read.
+Control commands keep their full argument list, including the shell positional
+parameters used by Runner launch and process-identity checks.
+
+An explicit private key selects dedicated-key authentication. That path ignores
+ambient SSH client configuration, uses only the staged key, disables the SSH
+agent, and disables agent, X11, and port forwarding. Configure the host, port,
+user, and host-key policy in the SSH environment itself. A connection without an
+explicit private key retains its existing SSH configuration and authentication
+mode.
+
+These launch changes do not add remote process ownership or recovery. An SSH
+client exit, timeout, or disconnect alone does not prove that a remote provider
+or its descendants stopped.
+
 ## Project Repository Checkouts
 
 Tasks use every distinct repository attached to their project, including repository-only sources with no local folder. Paperclip creates a managed checkout when no local folder is configured. The selected repository remains at the task workspace root. Other project repositories have editable, independent Git checkouts under `.paperclip-repositories/<name>-<key>`. Workspace hints expose each checkout path to the agent.
