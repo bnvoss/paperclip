@@ -36,7 +36,7 @@ afterEach(async () => {
   while (roots.length) await rm(roots.pop()!, { recursive: true, force: true });
 });
 
-async function fixture() {
+async function fixture({ traceProfile = true } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "paperclip-ssh-stdin-"));
   roots.push(root);
   const record = path.join(root, "ssh.json");
@@ -49,7 +49,7 @@ async function fixture() {
       "export PAPERCLIP_SYNTHETIC_PROFILE_READ=yes",
       // Profiles cannot consume the confidential header or the program's input.
       "read -r unused_profile_input || true",
-      "set -xv",
+      traceProfile ? "set -xv" : "",
     ].join("\n"),
     { mode: 0o600 },
   );
@@ -90,6 +90,23 @@ const snapshot = () => ({
 process.stdin.on('data', chunk => input.push(chunk));
 process.stdin.on('end', () => {
   fs.writeFileSync(${JSON.stringify(outcome)},JSON.stringify(snapshot()),{mode:0o600});
+  if (process.argv[2] === 'split' || process.argv[2] === 'split-fail' || process.argv[2] === 'partial') {
+    process.stdout.write(Buffer.from([0xce]));
+    process.stderr.write(Buffer.from([0xe2]));
+    if (process.argv[2] !== 'partial') {
+      setTimeout(() => {
+        process.stdout.write(Buffer.from([0xbb]));
+        process.stderr.write(Buffer.from([0x82]));
+        setTimeout(() => {
+          process.stderr.write(Buffer.from([0xac]));
+          process.exitCode = process.argv[2] === 'split-fail' ? 23 : 0;
+        }, 30);
+      }, 30);
+    } else {
+      process.stderr.write(Buffer.from([0x82]));
+    }
+    return;
+  }
   process.stdout.write('ready\\n');
   process.stderr.write('diagnostic\\n');
   if(process.argv[2] === 'flood') process.stdout.write('x'.repeat(12000));
@@ -170,273 +187,334 @@ async function verify(
   return { transport, observed };
 }
 
-describe.skipIf(process.platform === "win32")("SSH confidential environment stdin transport", () => {
-  it.each([
-    undefined,
-    "",
-    "quotes '\"\nλ\0no final newline",
-    "PAPERCLIP_SSH_ENV_END\n" + "long λ input\n".repeat(40_000),
-  ])(
-    "preserves program stdin and EOF through the actual shell (%#)",
-    async (input) => {
+describe.skipIf(process.platform === "win32")(
+  "SSH confidential environment stdin transport",
+  () => {
+    it.each([
+      undefined,
+      "",
+      "quotes '\"\nλ\0no final newline",
+      "PAPERCLIP_SSH_ENV_END\n" + "long λ input\n".repeat(40_000),
+    ])(
+      "preserves program stdin and EOF through the actual shell (%#)",
+      async (input) => {
+        const f = await fixture();
+        const target = await buildSshSpawnTarget({
+          spec: f.spec,
+          command: process.execPath,
+          args: [f.inspector],
+          env: launchEnv,
+          stdin: input,
+        });
+        try {
+          const result = await executeTarget(target);
+          expect(result.code).toBe(0);
+          expect(result.stdout).toBe("ready\n");
+          const { transport } = await verify(
+            f,
+            input,
+            result.stdout + result.stderr,
+          );
+          expect(JSON.stringify(transport.args)).not.toContain(
+            target.transportStdin.split("\n")[0],
+          );
+          expect(transport.args).toEqual(
+            expect.arrayContaining([
+              "-F",
+              "/dev/null",
+              "IdentitiesOnly=yes",
+              "IdentityAgent=none",
+              "PreferredAuthentications=publickey",
+              "ForwardAgent=no",
+              "ForwardX11=no",
+              "ClearAllForwardings=yes",
+            ]),
+          );
+          for (const file of transport.files) {
+            expect(file.mode).toBe(0o600);
+            expect(file.dirMode).toBe(0o700);
+          }
+        } finally {
+          await target.cleanup();
+        }
+        const { files } = JSON.parse(await readFile(f.record, "utf8"));
+        for (const file of files)
+          await expect(stat(file.path)).rejects.toThrow();
+      },
+    );
+
+    it("uses the same safe channel for runSshCommand", async () => {
+      const f = await fixture();
+      const input = "command input\nwithout final newline";
+      const result = await runSshCommand(
+        f.spec,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)}`,
+        { env: launchEnv, stdin: input },
+      );
+      await verify(f, input, result.stdout + result.stderr);
+      for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
+        await expect(stat(file.path)).rejects.toThrow();
+    });
+
+    it.each([undefined, 3])(
+      "decodes split UTF-8 stdout/stderr while counting original bytes (limit: %s)",
+      async (maxBuffer) => {
+        const f = await fixture({ traceProfile: false });
+        const result = await runSshCommand(
+          f.spec,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} split`,
+          { env: launchEnv, maxBuffer },
+        );
+        expect(result.stdout).toBe("λ");
+        expect(result.stderr).toBe("€");
+        await verify(f, undefined, result.stdout + result.stderr);
+      },
+    );
+
+    it("flushes incomplete UTF-8 sequences on each stream at EOF", async () => {
+      const f = await fixture({ traceProfile: false });
+      const result = await runSshCommand(
+        f.spec,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} partial`,
+        { env: launchEnv, maxBuffer: 2 },
+      );
+      expect(result.stdout).toBe("�");
+      expect(result.stderr).toBe("�");
+    });
+
+    it("retains decoded UTF-8 output on nonzero exit", async () => {
+      const f = await fixture({ traceProfile: false });
+      await expect(
+        runSshCommand(
+          f.spec,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} split-fail`,
+          { env: launchEnv },
+        ),
+      ).rejects.toMatchObject({ code: 23, stdout: "λ", stderr: "€" });
+    });
+
+    it("rejects output when original stream bytes exceed the limit", async () => {
+      const f = await fixture({ traceProfile: false });
+      await expect(
+        runSshCommand(
+          f.spec,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} split`,
+          { env: launchEnv, maxBuffer: 2 },
+        ),
+      ).rejects.toThrow("maxBuffer of 2 bytes");
+      for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
+        await expect(stat(file.path)).rejects.toThrow();
+    });
+
+    it("delivers bridge control env through the command runner and preserves failure output/exit", async () => {
+      const f = await fixture();
+      const logs: string[] = [];
+      const runner = createSshCommandManagedRuntimeRunner({ spec: f.spec });
+      const result = await runner.execute({
+        command: "sh",
+        args: [
+          "-c",
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} 23`,
+        ],
+        env: launchEnv,
+        stdin: "bridge input",
+        onLog: async (_stream, line) => {
+          logs.push(line);
+        },
+      });
+      expect(result.exitCode).toBe(23);
+      expect(result.timedOut).toBe(false);
+      expect(result.stdout).toBe("ready\n");
+      expect(result.stderr).toContain("diagnostic\n");
+      await verify(f, "bridge input", logs.join(""));
+    });
+
+    it("preserves shell positional arguments used by remote runner launch and identity controls", async () => {
+      const f = await fixture();
+      const runner = createSshCommandManagedRuntimeRunner({ spec: f.spec });
+      const result = await runner.execute({
+        command: "sh",
+        args: [
+          "-c",
+          'exec "$1" "$2" "$3"',
+          "paperclip-runner-monitor",
+          process.execPath,
+          f.inspector,
+          "23",
+        ],
+        env: launchEnv,
+        stdin: "native control input",
+      });
+      expect(result.exitCode).toBe(23);
+      await verify(f, "native control input", result.stdout + result.stderr);
+    });
+
+    it.each([undefined, "the original prompt\n"])(
+      "keeps runChildProcess prompt metadata separate and streams normal program output (%#)",
+      async (input) => {
+        const f = await fixture();
+        const logs: string[] = [];
+        const options = {
+          cwd: f.root,
+          env: launchEnv,
+          stdin: input,
+          remoteExecution: f.spec,
+          timeoutSec: 5,
+          graceSec: 1,
+          onLog: async (_stream: string, line: string) => {
+            logs.push(line);
+          },
+        };
+        const result = await runChildProcess(
+          "synthetic-ssh-stdin",
+          process.execPath,
+          [f.inspector],
+          options,
+        );
+        expect(result.exitCode).toBe(0);
+        expect(options.stdin).toBe(input);
+        await verify(f, options.stdin, logs.join(""));
+      },
+    );
+
+    it("cleans explicit-key staging on SSH launch failure, including early stdin close", async () => {
+      const f = await fixture();
+      vi.stubEnv("PAPERCLIP_SYNTHETIC_SSH_FAIL", "yes");
+      await expect(
+        runSshCommand(f.spec, "exit 0", {
+          env: launchEnv,
+          stdin: "x".repeat(1024 * 1024),
+        }),
+      ).rejects.toMatchObject({ code: 255 });
+      const record = JSON.parse(await readFile(f.record, "utf8"));
+      for (const file of record.files)
+        await expect(stat(file.path)).rejects.toThrow();
+      await expect(stat(f.outcome)).rejects.toThrow();
+    });
+
+    it("fails closed on missing or invalid transport headers without launching the program", async () => {
       const f = await fixture();
       const target = await buildSshSpawnTarget({
         spec: f.spec,
         command: process.execPath,
         args: [f.inspector],
         env: launchEnv,
-        stdin: input,
       });
       try {
-        const result = await executeTarget(target);
-        expect(result.code).toBe(0);
-        expect(result.stdout).toBe("ready\n");
-        const { transport } = await verify(
-          f,
-          input,
-          result.stdout + result.stderr,
-        );
-        expect(JSON.stringify(transport.args)).not.toContain(
-          target.transportStdin.split("\n")[0],
-        );
-        expect(transport.args).toEqual(
-          expect.arrayContaining([
-            "-F",
-            "/dev/null",
-            "IdentitiesOnly=yes",
-            "IdentityAgent=none",
-            "PreferredAuthentications=publickey",
-            "ForwardAgent=no",
-            "ForwardX11=no",
-            "ClearAllForwardings=yes",
-          ]),
-        );
-        for (const file of transport.files) {
-          expect(file.mode).toBe(0o600);
-          expect(file.dirMode).toBe(0o700);
+        for (const stdin of ["", "invalid-base64!\n"]) {
+          const result = await executeTarget(target, stdin);
+          expect(result.code).toBe(125);
+          expect(result.stderr).not.toContain("synthetic-secret");
+          await expect(stat(f.outcome)).rejects.toThrow();
         }
       } finally {
         await target.cleanup();
       }
-      const { files } = JSON.parse(await readFile(f.record, "utf8"));
-      for (const file of files) await expect(stat(file.path)).rejects.toThrow();
-    },
-  );
-
-  it("uses the same safe channel for runSshCommand", async () => {
-    const f = await fixture();
-    const input = "command input\nwithout final newline";
-    const result = await runSshCommand(
-      f.spec,
-      `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)}`,
-      { env: launchEnv, stdin: input },
-    );
-    await verify(f, input, result.stdout + result.stderr);
-    for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
-      await expect(stat(file.path)).rejects.toThrow();
-  });
-
-  it("delivers bridge control env through the command runner and preserves failure output/exit", async () => {
-    const f = await fixture();
-    const logs: string[] = [];
-    const runner = createSshCommandManagedRuntimeRunner({ spec: f.spec });
-    const result = await runner.execute({
-      command: "sh",
-      args: [
-        "-c",
-        `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} 23`,
-      ],
-      env: launchEnv,
-      stdin: "bridge input",
-      onLog: async (_stream, line) => {
-        logs.push(line);
-      },
     });
-    expect(result.exitCode).toBe(23);
-    expect(result.timedOut).toBe(false);
-    expect(result.stdout).toBe("ready\n");
-    expect(result.stderr).toContain("diagnostic\n");
-    await verify(f, "bridge input", logs.join(""));
-  });
 
-  it("preserves shell positional arguments used by remote runner launch and identity controls", async () => {
-    const f = await fixture();
-    const runner = createSshCommandManagedRuntimeRunner({ spec: f.spec });
-    const result = await runner.execute({
-      command: "sh",
-      args: ["-c", 'exec "$1" "$2" "$3"', "paperclip-runner-monitor", process.execPath, f.inspector, "23"],
-      env: launchEnv,
-      stdin: "native control input",
-    });
-    expect(result.exitCode).toBe(23);
-    await verify(f, "native control input", result.stdout + result.stderr);
-  });
-
-  it.each([undefined, "the original prompt\n"])(
-    "keeps runChildProcess prompt metadata separate and streams normal program output (%#)",
-    async (input) => {
+    it("does not disable the declared ambient authentication mode when no key is configured", async () => {
       const f = await fixture();
-      const logs: string[] = [];
-      const options = {
-        cwd: f.root,
-        env: launchEnv,
-        stdin: input,
-        remoteExecution: f.spec,
-        timeoutSec: 5,
-        graceSec: 1,
-        onLog: async (_stream: string, line: string) => {
-          logs.push(line);
-        },
-      };
-      const result = await runChildProcess(
-        "synthetic-ssh-stdin",
-        process.execPath,
-        [f.inspector],
-        options,
-      );
-      expect(result.exitCode).toBe(0);
-      expect(options.stdin).toBe(input);
-      await verify(f, options.stdin, logs.join(""));
-    },
-  );
-
-  it("cleans explicit-key staging on SSH launch failure, including early stdin close", async () => {
-    const f = await fixture();
-    vi.stubEnv("PAPERCLIP_SYNTHETIC_SSH_FAIL", "yes");
-    await expect(
-      runSshCommand(f.spec, "exit 0", {
-        env: launchEnv,
-        stdin: "x".repeat(1024 * 1024),
-      }),
-    ).rejects.toMatchObject({ code: 255 });
-    const record = JSON.parse(await readFile(f.record, "utf8"));
-    for (const file of record.files)
-      await expect(stat(file.path)).rejects.toThrow();
-    await expect(stat(f.outcome)).rejects.toThrow();
-  });
-
-  it("fails closed on missing or invalid transport headers without launching the program", async () => {
-    const f = await fixture();
-    const target = await buildSshSpawnTarget({
-      spec: f.spec,
-      command: process.execPath,
-      args: [f.inspector],
-      env: launchEnv,
-    });
-    try {
-      for (const stdin of ["", "invalid-base64!\n"]) {
-        const result = await executeTarget(target, stdin);
-        expect(result.code).toBe(125);
-        expect(result.stderr).not.toContain("synthetic-secret");
-        await expect(stat(f.outcome)).rejects.toThrow();
+      const target = await buildSshSpawnTarget({
+        spec: { ...f.spec, privateKey: null },
+        command: "true",
+        args: [],
+        env: {},
+      });
+      try {
+        expect(target.args).not.toContain("IdentityAgent=none");
+        expect(target.args).not.toContain("IdentitiesOnly=yes");
+        expect(target.args).not.toContain("-F");
+        expect(target.args).not.toContain("-i");
+      } finally {
+        await target.cleanup();
       }
-    } finally {
-      await target.cleanup();
-    }
-  });
-
-  it("does not disable the declared ambient authentication mode when no key is configured", async () => {
-    const f = await fixture();
-    const target = await buildSshSpawnTarget({
-      spec: { ...f.spec, privateKey: null },
-      command: "true",
-      args: [],
-      env: {},
     });
-    try {
-      expect(target.args).not.toContain("IdentityAgent=none");
-      expect(target.args).not.toContain("IdentitiesOnly=yes");
-      expect(target.args).not.toContain("-F");
-      expect(target.args).not.toContain("-i");
-    } finally {
-      await target.cleanup();
-    }
-  });
 
-  it("resolves the explicit key and isolation settings with the real SSH client without connecting", async () => {
-    const f = await fixture();
-    const target = await buildSshSpawnTarget({
-      spec: f.spec,
-      command: "true",
-      args: [],
-      env: {},
-    });
-    try {
-      const config = await new Promise<string>((resolve, reject) => {
-        execFile("/usr/bin/ssh", ["-G", ...target.args], (error, stdout) =>
-          error ? reject(error) : resolve(stdout),
+    it("resolves the explicit key and isolation settings with the real SSH client without connecting", async () => {
+      const f = await fixture();
+      const target = await buildSshSpawnTarget({
+        spec: f.spec,
+        command: "true",
+        args: [],
+        env: {},
+      });
+      try {
+        const config = await new Promise<string>((resolve, reject) => {
+          execFile("/usr/bin/ssh", ["-G", ...target.args], (error, stdout) =>
+            error ? reject(error) : resolve(stdout),
+          );
+        });
+        const settings = Object.fromEntries(
+          config
+            .trim()
+            .split("\n")
+            .map((line) => {
+              const at = line.indexOf(" ");
+              return [line.slice(0, at), line.slice(at + 1)];
+            }),
         );
-      });
-      const settings = Object.fromEntries(
-        config
-          .trim()
-          .split("\n")
-          .map((line) => {
-            const at = line.indexOf(" ");
-            return [line.slice(0, at), line.slice(at + 1)];
-          }),
-      );
-      const keyPath = target.args[target.args.indexOf("-i") + 1];
-      expect(
-        config.split("\n").filter((line) => line.startsWith("identityfile ")),
-      ).toEqual([`identityfile ${keyPath}`]);
-      expect(settings).toMatchObject({
-        identitiesonly: "yes",
-        identityagent: "none",
-        preferredauthentications: "publickey",
-        forwardagent: "no",
-        forwardx11: "no",
-        clearallforwardings: "yes",
-      });
-    } finally {
-      await target.cleanup();
-    }
-  });
+        const keyPath = target.args[target.args.indexOf("-i") + 1];
+        expect(
+          config.split("\n").filter((line) => line.startsWith("identityfile ")),
+        ).toEqual([`identityfile ${keyPath}`]);
+        expect(settings).toMatchObject({
+          identitiesonly: "yes",
+          identityagent: "none",
+          preferredauthentications: "publickey",
+          forwardagent: "no",
+          forwardx11: "no",
+          clearallforwardings: "yes",
+        });
+      } finally {
+        await target.cleanup();
+      }
+    });
 
-  it("rejects invalid env names and NUL values before creating authentication staging", async () => {
-    const f = await fixture();
-    const invalidEnvs: Record<string, string>[] = [
-      { "BAD KEY": marker },
-      { SAFE: `${marker}\0` },
-    ];
-    for (const env of invalidEnvs) {
+    it("rejects invalid env names and NUL values before creating authentication staging", async () => {
+      const f = await fixture();
+      const invalidEnvs: Record<string, string>[] = [
+        { "BAD KEY": marker },
+        { SAFE: `${marker}\0` },
+      ];
+      for (const env of invalidEnvs) {
+        await expect(
+          buildSshSpawnTarget({ spec: f.spec, command: "true", args: [], env }),
+        ).rejects.toThrow(/SSH environment/);
+        await expect(runSshCommand(f.spec, "true", { env })).rejects.toThrow(
+          /SSH environment/,
+        );
+      }
+      await expect(stat(f.record)).rejects.toThrow();
+    });
+
+    it("preserves timeout reporting and removes staged auth after the exercised child exits", async () => {
+      const f = await fixture();
       await expect(
-        buildSshSpawnTarget({ spec: f.spec, command: "true", args: [], env }),
-      ).rejects.toThrow(/SSH environment/);
-      await expect(runSshCommand(f.spec, "true", { env })).rejects.toThrow(
-        /SSH environment/,
-      );
-    }
-    await expect(stat(f.record)).rejects.toThrow();
-  });
+        runSshCommand(
+          f.spec,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} hang`,
+          { env: launchEnv, timeoutMs: 700 },
+        ),
+      ).rejects.toMatchObject({ killed: true });
+      const observed = JSON.parse(await readFile(f.outcome, "utf8"));
+      expect(() => process.kill(observed.pid, 0)).toThrow();
+      for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
+        await expect(stat(file.path)).rejects.toThrow();
+    });
 
-  it("preserves timeout reporting and removes staged auth after the exercised child exits", async () => {
-    const f = await fixture();
-    await expect(
-      runSshCommand(
-        f.spec,
-        `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} hang`,
-        { env: launchEnv, timeoutMs: 700 },
-      ),
-    ).rejects.toMatchObject({ killed: true });
-    const observed = JSON.parse(await readFile(f.outcome, "utf8"));
-    expect(() => process.kill(observed.pid, 0)).toThrow();
-    for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
-      await expect(stat(file.path)).rejects.toThrow();
-  });
-
-  it("retains output-limit failure and cleans staging after the SSH child closes", async () => {
-    const f = await fixture();
-    await expect(
-      runSshCommand(
-        f.spec,
-        `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} flood`,
-        { env: launchEnv, maxBuffer: 10_000 },
-      ),
-    ).rejects.toThrow("maxBuffer");
-    const observed = JSON.parse(await readFile(f.outcome, "utf8"));
-    expect(() => process.kill(observed.pid, 0)).toThrow();
-    for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
-      await expect(stat(file.path)).rejects.toThrow();
-  });
-});
+    it("retains output-limit failure and cleans staging after the SSH child closes", async () => {
+      const f = await fixture();
+      await expect(
+        runSshCommand(
+          f.spec,
+          `exec ${shellQuote(process.execPath)} ${shellQuote(f.inspector)} flood`,
+          { env: launchEnv, maxBuffer: 10_000 },
+        ),
+      ).rejects.toThrow("maxBuffer");
+      const observed = JSON.parse(await readFile(f.outcome, "utf8"));
+      expect(() => process.kill(observed.pid, 0)).toThrow();
+      for (const file of JSON.parse(await readFile(f.record, "utf8")).files)
+        await expect(stat(file.path)).rejects.toThrow();
+    });
+  },
+);
