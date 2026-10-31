@@ -7,6 +7,8 @@ import { rememberVerifiedSlackSearchEvent, slackSearchActionToken } from "./conn
 import { slackAuthorizationRevision } from "./connectors/slack-revision.js";
 import { slackPublicationAllowed } from "./connectors/slack-access.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { normalizeEnvironmentConfig } from "./environment-config.js";
+import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 import { registerSlackTaskAuthority, slackRunOrigin } from "./connectors/slack-authority.js";
 import { captureRunIdentity } from "./run-identity.js";
 import { buildChatCommunicationGuidance } from "./chat-communication-guidance.js";
@@ -109,6 +111,7 @@ import {
   nativeRunFinalizations,
   nativeRunResults,
   environmentLeases,
+  environments,
   issueComments,
   issueAttachments,
   issueThreadInteractions,
@@ -12297,6 +12300,37 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     const checkpoint = run.runnerProfileJson?.sessionCheckpoint as
       | Record<string, unknown>
       | undefined;
+    // Backup compatibility uses today's saved selection, never the old run's
+    // config snapshot or a caller-supplied target. This read resolves no key.
+    let runnerExecutionTarget: AdapterExecutionTarget | null = null;
+    if (leases.length > 0) {
+      const [actor] = await tx.select({ adapterType: agents.adapterType,
+        defaultEnvironmentId: agents.defaultEnvironmentId }).from(agents)
+        .where(and(eq(agents.id, source.agentId), eq(agents.companyId, companyId)))
+        .for("share", { noWait: true });
+      if (!actor) throw failedChatRetryDenied();
+      const selectedId = actor.defaultEnvironmentId ?? (await instanceSettingsService(tx as Db).get()).defaultEnvironmentId;
+      if (selectedId) {
+        const [environment] = await tx.select().from(environments).where(eq(environments.id, selectedId))
+          .for("share", { noWait: true });
+        if (!environment || environment.status !== "active") throw failedChatRetryDenied();
+        if (environment.driver === "ssh") {
+          const config = normalizeEnvironmentConfig({ driver: "ssh", config: environment.config }) as unknown as import("@paperclipai/shared").SshEnvironmentConfig;
+          const matching = leases.filter(lease => lease.provider === "ssh" && lease.environmentId === selectedId);
+          const paths = new Set(matching.map(lease => typeof lease.metadata?.remoteCwd === "string" && lease.metadata.remoteCwd.trim()
+            ? lease.metadata.remoteCwd.trim() : config.remoteWorkspacePath));
+          if (!matching.length || paths.size !== 1 || (config.trustedManagement === true && actor.adapterType !== "paperclip_runner")) {
+            throw failedChatRetryDenied();
+          }
+          const remoteCwd = [...paths][0]!;
+          runnerExecutionTarget = { kind: "remote", transport: "ssh", environmentId: selectedId,
+            trustedManagement: config.trustedManagement === true, remoteCwd,
+            spec: { host: config.host, port: config.port, username: config.username,
+              remoteWorkspacePath: config.remoteWorkspacePath, privateKey: null,
+              knownHosts: config.knownHosts, strictHostKeyChecking: config.strictHostKeyChecking, remoteCwd } };
+        }
+      }
+    }
     if (
       !run.nativeSessionId ||
       !run.runnerInstanceId ||
@@ -12304,6 +12338,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         (typeof checkpoint.providerSessionId !== "string" ||
           checkpoint.providerSessionId.trim().length === 0)) ||
       !nativeFailedRunRetryStateIsSafe({
+        runnerExecutionTarget,
         execution: run.runnerProfileJson?.nativeExecutionInput,
         companyId,
         issueId: source.issueId,

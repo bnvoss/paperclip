@@ -28,6 +28,19 @@ improvements. Tasks, comments, skills and instructions remain company-trusted
 inputs that can influence what the privileged role does. This feature does not
 establish actor or prompt isolation.
 
+For an admitted trusted SSH run, the controlled bootstrap starts with an empty
+environment and does not explicitly source system or account profiles. The
+controller projects its executable, CA and connection inputs through the framed
+stdin channel. The provider uses its session-owned `HOME` and `CODEX_HOME`.
+Credential-home materialization uses only an explicitly projected source;
+missing provider keys do not fall back to ambient account/controller keys.
+Ordinary unadmitted SSH retains its existing profile-dependent behavior.
+
+The SSH account's normal operating-system and shell initialization remains a
+trusted host precondition. It can run before Paperclip's command. This boundary
+separates the controlled provider/runtime profile; it does not provide total
+root-shell isolation or undo earlier account-shell effects.
+
 Instance-admin authority protects the SSH binding and environment configuration.
 For an already trusted role, the extra guard compares effective changes to:
 
@@ -68,6 +81,10 @@ cannot reuse the broader provider. Older SSH checkpoints/backups without the
 binding are ineligible for reuse; preserve them for recovery and start a fresh
 controlled session. Local and Sandbox checkpoint/backup digests retain their prior shapes. Legacy
 confined Local provider state does not need the new optional fields.
+Failed-chat backup retry resolves the current saved environment selection and
+SSH configuration before checking the backup. An unchanged target can retry;
+a changed host, revoked profile, archived environment or changed binding cannot
+reuse the old SSH backup.
 The existing separately authorized cleanup path binds the exact retained
 profile when stopping its owned work; it does not authorize a new task.
 

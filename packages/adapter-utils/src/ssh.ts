@@ -31,6 +31,8 @@ export interface SshConnectionConfig {
   privateKey: string | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
+  /** Controller-owned native bootstrap; not a permission grant. */
+  isolateEnvironment?: boolean;
 }
 
 export interface SshCommandResult {
@@ -160,6 +162,7 @@ function buildSshStdinLaunch(input: {
   env: Record<string, string | undefined>;
   remoteCommand: string;
   stdin?: string;
+  isolateEnvironment?: boolean;
 }): { remoteCommand: string; transportStdin: string } {
   const entries = Object.entries(input.env).filter(
     (entry): entry is [string, string] => typeof entry[1] === "string",
@@ -181,10 +184,12 @@ function buildSshStdinLaunch(input: {
   // confidential header, and turn off profile-enabled tracing before reading it.
   const script = [
     "set +xv",
-    'if [ -f /etc/profile ]; then . /etc/profile </dev/null >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" </dev/null >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" </dev/null >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" </dev/null >/dev/null 2>&1 || true; fi',
-    'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" </dev/null >/dev/null 2>&1 || true; fi',
+    ...(input.isolateEnvironment ? [] : [
+      'if [ -f /etc/profile ]; then . /etc/profile </dev/null >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" </dev/null >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile" </dev/null >/dev/null 2>&1 || true; elif [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc" </dev/null >/dev/null 2>&1 || true; fi',
+      'if [ -f "$HOME/.zprofile" ]; then . "$HOME/.zprofile" </dev/null >/dev/null 2>&1 || true; fi',
+    ]),
     "set +xv",
     "set +a",
     `IFS= read -r ${encoded} || { echo 'Missing SSH environment input.' >&2; exit 125; }`,
@@ -193,7 +198,11 @@ function buildSshStdinLaunch(input: {
     input.remoteCommand,
   ];
   return {
-    remoteCommand: `sh -c ${shellQuote(script.join("\n"))}`,
+    // The account's SSH shell may already have initialized. Only the controlled
+    // bootstrap and child are clean; never claim total account-shell isolation.
+    remoteCommand: input.isolateEnvironment
+      ? `/usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /bin/sh -c ${shellQuote(script.join("\n"))}`
+      : `sh -c ${shellQuote(script.join("\n"))}`,
     transportStdin: `${Buffer.from(exportScript, "utf8").toString("base64")}\n${input.stdin ?? ""}`,
   };
 }
@@ -1350,8 +1359,9 @@ export async function runSshCommand(
 ): Promise<SshCommandResult> {
   const launch = buildSshStdinLaunch({
     env: options.env ?? {},
-    remoteCommand: `exec sh -c ${shellQuote(remoteCommand)}`,
+    remoteCommand: `exec ${config.isolateEnvironment ? "/bin/sh" : "sh"} -c ${shellQuote(remoteCommand)}`,
     stdin: options.stdin,
+    isolateEnvironment: config.isolateEnvironment === true,
   });
   const auth = await createSshAuthArgs(config);
   try {
@@ -1388,6 +1398,7 @@ export async function buildSshSpawnTarget(input: {
     env: input.env,
     remoteCommand: `cd ${shellQuote(input.spec.remoteCwd)} && exec ${command}`,
     stdin: input.stdin,
+    isolateEnvironment: input.spec.isolateEnvironment === true,
   });
   const auth = await createSshAuthArgs(input.spec);
   return {

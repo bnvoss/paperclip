@@ -95,6 +95,7 @@ type BackendFactoryOptions = {
 };
 
 type RunnerTransportOptions = {
+  sourceCodexHome?: string | null;
   acpxRuntimeDirectory?: string;
   adoptExistingRunner?: { pid: number; isAlive: () => Promise<boolean> | boolean };
   stateDirectory?: string;
@@ -4212,6 +4213,9 @@ describe("stopped native conversation physical cleanup", () => {
 describe("explicit failed native retry physical evidence", () => {
   it.each([
     "suspended",
+    "ssh_backup",
+    "ssh_backup_changed",
+    "ssh_backup_revoked",
     "distinct_account",
     "null_account",
     "wrong_account",
@@ -4264,6 +4268,10 @@ describe("explicit failed native retry physical evidence", () => {
       .digest("hex");
     const root = join(stateBase, key);
     const bootstrap = kind.includes("bootstrap");
+    const sshBackup = kind.startsWith("ssh_backup");
+    const savedTarget = { kind: "remote" as const, transport: "ssh" as const, environmentId: "retry-ssh",
+      trustedManagement: true, remoteCwd: "/workspace", spec: { host: "synthetic.example.test", port: 22,
+        username: "synthetic", remoteWorkspacePath: "/workspace", remoteCwd: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true } };
     const providerAccount = kind === "null_account" ? null : "backend-account";
     const expectedAccount =
       kind === "wrong_account"
@@ -4279,6 +4287,7 @@ describe("explicit failed native retry physical evidence", () => {
           : "exact-thread";
     const retryable = [
       "suspended",
+      "ssh_backup",
       "distinct_account",
       "null_account",
     ].includes(kind);
@@ -4344,8 +4353,21 @@ describe("explicit failed native retry physical evidence", () => {
           { recursive: true },
         );
       }
+      if (sshBackup) {
+        const current = join(root, "failover-backups", "current");
+        await mkdir(join(current, "codex-home"), { recursive: true });
+        await writeFile(join(current, "codex-home", "synthetic-state"), "synthetic");
+        await rename(join(root, "runner"), join(current, "runner"));
+        const manifest = buildNativeHarnessBackupManifest({ backupRoot: current, execution,
+          runnerExecutionTarget: savedTarget, runnerInstanceId: "runner-retry", sourceProviderLeaseId: "lease-retry",
+          providerSessionIdentity: { providerSessionId: "exact-thread", providerBackendSessionId: providerAccount, providerSessionIdentity: null } });
+        await writeFile(join(current, "manifest.json"), JSON.stringify(manifest));
+      }
       const before = await readdir(stateBase);
       const retryInput = {
+        runnerExecutionTarget: sshBackup ? { ...savedTarget,
+          trustedManagement: kind !== "ssh_backup_revoked",
+          spec: { ...savedTarget.spec, host: kind === "ssh_backup_changed" ? "changed.example.test" : savedTarget.spec.host } } : undefined,
         execution,
         ...execution.binding,
         nativeSessionId: execution.session.normalizedSessionId!,
@@ -4358,12 +4380,12 @@ describe("explicit failed native retry physical evidence", () => {
         recoveryMode: bootstrap
           ? ("bootstrap_retry" as const)
           : ("exact_checkpoint_resume" as const),
-        allowVerifiedBackup: false,
+        allowVerifiedBackup: sshBackup,
       };
       expect
         .soft(nativeFailedRunRetryStateIsSafe(retryInput))
         .toBe(retryable || kind === "bootstrap");
-      if (!bootstrap && kind !== "symlink") {
+      if (!bootstrap && kind !== "symlink" && !sshBackup) {
         const files = [
           "control-plane/control-plane-state.json",
           "runner/runner-state.json",
@@ -11100,7 +11122,7 @@ describe("runnerd provider runtime wiring", () => {
     );
   });
 
-  it.each([false, true])("uses the remote workspace and controller-resolved SSH permissions (trusted=%s)", async trustedManagement => {
+  it.each([[false, false], [true, false], [true, true]])("uses the remote workspace and controller-resolved SSH permissions (trusted=%s, projected=%s)", async (trustedManagement, projected) => {
     const remoteCwd = "/home/daytona/paperclip-workspace";
     const remoteExecution = {
       ...execution,
@@ -11147,11 +11169,17 @@ describe("runnerd provider runtime wiring", () => {
       highestContiguousSourceSeq: 1,
     });
 
+    const ambientKeys = ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME"] as const;
+    const priorAmbient = ambientKeys.map(key => process.env[key]);
+    for (const key of ambientKeys) process.env[key] = `synthetic-ambient-${key}`;
+    try {
     await executePaperclipNativeSession({
       db: leaseDb(remoteExecution, {}, {}, [], {}, "running", { driver: "ssh", status: "active", config: { host: "runner.internal", port: 22, username: "runner", remoteWorkspacePath: remoteCwd, strictHostKeyChecking: true, trustedManagement } }),
       execution: remoteExecution,
       runnerInstanceId: "runner",
       useRunnerd: true,
+      runnerEnvironment: projected ? { PATH: "/synthetic/qualified/bin:/usr/bin:/bin", OPENAI_API_KEY: "synthetic-projected-key", NODE_EXTRA_CA_CERTS: "/synthetic/projected-ca" } : undefined,
+      managedAiCredentialHome: projected ? "/synthetic/projected-home" : undefined,
       runnerExecutionTarget: {
         kind: "remote",
         transport: "ssh",
@@ -11210,6 +11238,20 @@ describe("runnerd provider runtime wiring", () => {
     expect(state.createTransport.mock.calls[0]![0].runnerBinary).not.toBe(
       `${remoteCwd}/.paperclip-runtime/paperclip-runner/bin/paperclip-runnerd`,
     );
+    if (trustedManagement) {
+      expect(sshTransportOptions.environment.CODEX_API_KEY).toBeUndefined();
+      expect(sshTransportOptions.environment.OPENAI_API_KEY).toBe(projected ? "synthetic-projected-key" : undefined);
+      expect(state.createTransport.mock.calls[0]![0].sourceCodexHome).toBe(projected ? "/synthetic/projected-home" : null);
+      expect(sshTransportOptions.environment.HOME).toBe(sshTransportOptions.environment.CODEX_HOME);
+      expect(sshTransportOptions.environment.HOME).toContain(remoteCwd);
+      if (projected) {
+        expect(sshTransportOptions.environment.PATH).toBe("/synthetic/qualified/bin:/usr/bin:/bin");
+        expect(sshTransportOptions.environment.NODE_EXTRA_CA_CERTS).toBe("/synthetic/projected-ca");
+      }
+    }
+    } finally { ambientKeys.forEach((key, index) => {
+      if (priorAmbient[index] === undefined) delete process.env[key]; else process.env[key] = priorAmbient[index];
+    }); }
   });
 
   it("archives failover evidence with an explicitly replaced provider session", async () => {

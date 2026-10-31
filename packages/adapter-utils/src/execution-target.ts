@@ -452,7 +452,11 @@ function isAdapterExecutionTargetInstance(value: unknown): value is AdapterExecu
 export function adapterExecutionTargetToRemoteSpec(
   target: AdapterExecutionTarget | null | undefined,
 ): AdapterRemoteExecutionSpec | null {
-  return target?.kind === "remote" && target.transport === "ssh" ? target.spec : null;
+  return target?.kind === "remote" && target.transport === "ssh" ? sshExecutionSpec(target) : null;
+}
+
+function sshExecutionSpec(target: AdapterSshExecutionTarget): SshRemoteExecutionSpec {
+  return target.trustedManagement === true ? { ...target.spec, isolateEnvironment: true } : target.spec;
 }
 
 export function adapterExecutionTargetIsRemote(
@@ -684,7 +688,7 @@ const SSH_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
 function adapterExecutionTargetCommandRunner(target: AdapterCommandCapableExecutionTarget): CommandManagedRuntimeRunner {
   if (target.transport === "ssh") {
     return createSshCommandManagedRuntimeRunner({
-      spec: target.spec,
+      spec: sshExecutionSpec(target),
       defaultCwd: target.remoteCwd,
       maxBufferBytes: SSH_COMMAND_MAX_BUFFER_BYTES,
     });
@@ -953,7 +957,7 @@ export async function runAdapterExecutionTargetShellCommand(
         // shell after the explicit `env KEY=VAL` overrides, re-sourcing
         // login profiles AFTER the override and silently undoing any
         // identity var (NVM_DIR / PATH / etc.) that a profile re-exports.
-        const result = await runSshCommand(target.spec, command, {
+        const result = await runSshCommand(sshExecutionSpec(target), command, {
           env,
           timeoutMs: (options.timeoutSec ?? 15) * 1000,
         });
@@ -1473,7 +1477,7 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
 
   if (target.transport === "ssh") {
     const prepared = await prepareRemoteManagedRuntime({
-      spec: target.spec,
+      spec: sshExecutionSpec(target),
       runId: input.runId,
       adapterKey: input.adapterKey,
       workspaceLocalDir: input.workspaceLocalDir,

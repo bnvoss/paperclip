@@ -91,6 +91,7 @@ import {
   resolveRunnerdAcpxPermissionMode,
   resolveRunnerdSessionIdentity,
   resolveSourceCodexHome,
+  resolveRunnerdCodexSourceHome,
   trustedRuntimeReadOnlyRoots,
   unseenRunnerdCommittedEvents,
   unwrapRunnerdProviderNotification,
@@ -7671,6 +7672,7 @@ it("runs and stops the trusted profile through the driver, actual Runner and syn
   const workspace = join(stateDirectory, "workspace");
   const sourceHome = join(stateDirectory, "source-home");
   await mkdir(workspace); await mkdir(sourceHome);
+  await writeFile(join(sourceHome, "auth.json"), JSON.stringify({ OPENAI_API_KEY: "synthetic-ambient-home-key" }));
   const fingerprint = `sha256:${"a".repeat(64)}`;
   const prpIdentity = { runnerInstanceId: "trusted-source-runner", environmentLeaseId: "trusted-source-lease",
     runId: "trusted-source-test", normalizedSessionId: "trusted-source-session", turnId: "trusted-source-turn", itemId: "trusted-source-item" };
@@ -7678,7 +7680,7 @@ it("runs and stops the trusted profile through the driver, actual Runner and syn
   const bundle = createCapabilityRunnerdCodexTransport({
     runnerBinary: defaultCapabilityRunnerdBinary(), codexCommand: fakeCodex,
     trustedSshManagement: true, executionTargetFingerprint: fingerprint,
-    sourceCodexHome: sourceHome, environment, stateDirectory, prpIdentity,
+    environment, stateDirectory, prpIdentity,
     codexArgs: [...createRunnerdCodexAppServerArgs({ environment, codexHome: join(stateDirectory, "codex-home"), trustedSshManagement: true }),
       ...fakeCodexArgs(stateDirectory, "--hold-turn", "--require-permission-profile", "paperclip-runner-trusted-ssh-management-v1")],
   });
@@ -7687,6 +7689,7 @@ it("runs and stops the trusted profile through the driver, actual Runner and syn
   let session: Awaited<ReturnType<typeof driver.openSession>> | null = null;
   try {
     session = await driver.openSession({ runId: "trusted-source-test", normalizedSessionId: "trusted-source-session", workingDirectory: workspace });
+    await expect(readFile(join(stateDirectory, "codex-home", "auth.json"))).rejects.toMatchObject({ code: "ENOENT" });
     const turn = await session.startTurn({ message: { role: "user", text: "Hold this synthetic operation until Stop." } });
     const persisted = JSON.parse(await readFile(join(stateDirectory, "runner", "codex-provider-state.json"), "utf8"));
     expect(persisted.config).toMatchObject({ trustedSshManagement: true, externallySandboxed: false, executionTargetFingerprint: fingerprint });
@@ -7712,3 +7715,10 @@ it("runs and stops the trusted profile through the driver, actual Runner and syn
   }
   expect(bundle.evidence().runnerExited).toBe(true);
 }, 30_000);
+
+it("uses only an explicitly projected credential home for trusted SSH", () => {
+  const environment = { HOME: "/synthetic/account", CODEX_HOME: "/synthetic/ambient-codex" };
+  expect(resolveRunnerdCodexSourceHome({ environment, trustedSshManagement: true })).toBeNull();
+  expect(resolveRunnerdCodexSourceHome({ environment, trustedSshManagement: true, sourceCodexHome: "/synthetic/projected-home" })).toBe("/synthetic/projected-home");
+  expect(resolveRunnerdCodexSourceHome({ environment })).toBe(environment.CODEX_HOME);
+});

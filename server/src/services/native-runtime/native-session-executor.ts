@@ -10760,7 +10760,7 @@ async function createRunnerdBackendWithinSessionClaim(
   const remoteCommandRunner = remoteTarget
     ? remoteTarget.transport === "ssh"
       ? createNativeSshCommandRunner({
-          spec: remoteTarget.spec,
+          spec: remoteTarget.trustedManagement === true ? { ...remoteTarget.spec, isolateEnvironment: true } : remoteTarget.spec,
           defaultCwd: remoteTarget.remoteCwd,
         })
       : remoteTarget.runner
@@ -12382,7 +12382,9 @@ async function createRunnerdBackendWithinSessionClaim(
   let effectiveRunnerEnvironmentBase: NodeJS.ProcessEnv = {
     ...(isGrok
       ? input.runnerEnvironment ?? {}
-      : resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment)),
+      : resolveNativeProviderEnvironment(input.execution.provider,
+          input.runnerEnvironment ?? (remoteTarget?.transport === "ssh" && remoteTarget.trustedManagement === true
+            ? buildNativeProviderEnvironment({}) : undefined))),
   };
   const grokCredential = isGrok ? await prepareGrokRunnerCredentials({
     companyId: input.execution.binding.companyId, environment: effectiveRunnerEnvironmentBase, remote: Boolean(remoteTarget),
@@ -12638,7 +12640,9 @@ async function createRunnerdBackendWithinSessionClaim(
         runnerBinary: controllerRunnerBinary,
         codexCommand: remoteCodexBinary ?? undefined,
         sourceCodexHome: remoteTarget
-          ? resolveSourceCodexHome(resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment))
+          ? remoteTarget.transport === "ssh" && remoteTarget.trustedManagement === true
+            ? input.managedAiCredentialHome ?? null
+            : resolveSourceCodexHome(resolveNativeProviderEnvironment(input.execution.provider, input.runnerEnvironment))
           : undefined,
         runnerProcessLauncher: remoteProcessLauncher,
         runnerReconnectGraceMs: remoteTarget ? 120_000 : undefined,

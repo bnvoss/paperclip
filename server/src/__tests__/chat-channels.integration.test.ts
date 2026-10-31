@@ -21,6 +21,7 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -83,6 +84,7 @@ import {
   nativeRunResults,
   nativeRunFinalizations,
   environmentLeases,
+  environments,
   principalPermissionGrants,
   toolConnections,
 } from "@paperclipai/db";
@@ -188,6 +190,7 @@ import {
 import { NativeRunCoordinatorStore } from "../services/native-runtime/native-run-coordinator-store.js";
 import { reconcileNativeFinalizations } from "../services/native-runtime/native-finalization-reconciler.js";
 import { PaperclipControlPlanePort } from "../services/native-runtime/paperclip-control-plane-port.js";
+import { buildNativeHarnessBackupManifest } from "../services/native-runtime/native-session-executor.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -56581,6 +56584,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
   it.each([
     "bootstrap",
     "checkpoint",
+    "ssh_backup",
+    "ssh_backup_changed",
+    "ssh_backup_revoked",
+    "ssh_backup_archived",
+    "ssh_backup_binding_changed",
     "distinct_account",
     "null_account",
     "wrong_account",
@@ -56605,6 +56613,11 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const context = await failedChatRetryFixture("telegram");
       const hasCheckpoint = [
         "checkpoint",
+        "ssh_backup",
+        "ssh_backup_changed",
+        "ssh_backup_revoked",
+        "ssh_backup_archived",
+        "ssh_backup_binding_changed",
         "distinct_account",
         "null_account",
         "wrong_account",
@@ -56629,6 +56642,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
               : providerAccount;
       const previousStateDirectory = process.env.PAPERCLIP_RUNNER_STATE_DIR;
       let stateDirectory: string | null = null;
+      const ownedEnvironmentIds: string[] = [];
       try {
         const nativeSessionId = randomUUID();
         const runnerInstanceId = randomUUID();
@@ -56819,6 +56833,39 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
               toolBridge: { pending: {} },
             }),
           );
+          if (kind.startsWith("ssh_backup")) {
+            const config = { host: "synthetic.example.test", port: 22, username: "synthetic",
+              remoteWorkspacePath: nativeExecutionInput.workspace.cwd, privateKey: null,
+              knownHosts: null, strictHostKeyChecking: true, trustedManagement: true };
+            const [environment] = await db.insert(environments).values({ name: `retry-ssh-${randomUUID()}`, driver: "ssh", status: "active", config }).returning();
+            ownedEnvironmentIds.push(environment.id);
+            await db.update(agents).set({ adapterType: "paperclip_runner", defaultEnvironmentId: environment.id })
+              .where(eq(agents.id, context.fixture.assignedAgentId));
+            const [lease] = await db.insert(environmentLeases).values({ companyId: context.fixture.companyId,
+              heartbeatRunId: context.runId, environmentId: environment.id, provider: "ssh",
+              status: "released", cleanupStatus: "success", releasedAt: new Date(),
+              metadata: { remoteCwd: config.remoteWorkspacePath } }).returning();
+            const current = path.join(root, "failover-backups", "current");
+            mkdirSync(path.join(current, "codex-home"), { recursive: true });
+            writeFileSync(path.join(current, "codex-home", "synthetic-state"), "synthetic");
+            renameSync(path.join(root, "runner"), path.join(current, "runner"));
+            const manifest = buildNativeHarnessBackupManifest({ backupRoot: current,
+              execution: nativeExecutionInput as Parameters<typeof buildNativeHarnessBackupManifest>[0]["execution"],
+              runnerInstanceId, sourceProviderLeaseId: lease.id,
+              runnerExecutionTarget: { kind: "remote", transport: "ssh", environmentId: environment.id,
+                trustedManagement: true, remoteCwd: config.remoteWorkspacePath,
+                spec: { ...config, remoteCwd: config.remoteWorkspacePath } },
+              providerSessionIdentity: { providerSessionId: "exact-retry-thread", providerBackendSessionId: providerAccount, providerSessionIdentity: null } });
+            writeFileSync(path.join(current, "manifest.json"), JSON.stringify(manifest));
+            if (kind === "ssh_backup_changed") await db.update(environments).set({ config: { ...config, host: "changed.example.test" } }).where(eq(environments.id, environment.id));
+            if (kind === "ssh_backup_revoked") await db.update(environments).set({ config: { ...config, trustedManagement: false } }).where(eq(environments.id, environment.id));
+            if (kind === "ssh_backup_archived") await db.update(environments).set({ status: "archived" }).where(eq(environments.id, environment.id));
+            if (kind === "ssh_backup_binding_changed") {
+              const [other] = await db.insert(environments).values({ name: `retry-ssh-other-${randomUUID()}`, driver: "ssh", status: "active", config }).returning();
+              ownedEnvironmentIds.push(other.id);
+              await db.update(agents).set({ defaultEnvironmentId: other.id }).where(eq(agents.id, context.fixture.assignedAgentId));
+            }
+          }
         }
         if (kind === "active_environment")
           await db.insert(environmentLeases).values({
@@ -56837,7 +56884,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
         );
         // A null account without existing provider-session evidence remains
         // conservatively ineligible for the exhausted-run recovery lane.
-        if (["bootstrap", "checkpoint", "distinct_account"].includes(kind)) {
+        if (["bootstrap", "checkpoint", "distinct_account", "ssh_backup"].includes(kind)) {
           const staged = await attempt;
           await expect(
             context.service.processFailedChatRunRetry(staged.actionId),
@@ -56856,6 +56903,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
           });
       } finally {
         await context.service.shutdown();
+        if (ownedEnvironmentIds.length) await db.delete(environments).where(inArray(environments.id, ownedEnvironmentIds));
         if (stateDirectory) {
           if (previousStateDirectory === undefined)
             delete process.env.PAPERCLIP_RUNNER_STATE_DIR;

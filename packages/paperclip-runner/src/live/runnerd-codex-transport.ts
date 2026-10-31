@@ -2382,7 +2382,8 @@ async function settleRetainedRunnerdSessionOwned(
       context: null,
       codexHome,
       sourceCodexHome:
-        input.sourceCodexHome ?? resolveSourceCodexHome(input.environment),
+        resolveRunnerdCodexSourceHome({ sourceCodexHome: input.sourceCodexHome, environment: input.environment,
+          trustedSshManagement: record(initial.provider.config).trustedSshManagement === true }),
       apiKey:
         input.environment?.CODEX_API_KEY ?? input.environment?.OPENAI_API_KEY,
     }),
@@ -3292,6 +3293,12 @@ export function resolveSourceCodexHome(
   if (explicit) return explicit;
   const home = environment?.HOME?.trim();
   return home ? resolve(home, ".codex") : null;
+}
+
+/** A trusted host run may copy only the separately projected credential home. */
+export function resolveRunnerdCodexSourceHome(options: Pick<CapabilityRunnerdCodexTransportOptions,
+  "sourceCodexHome" | "environment" | "trustedSshManagement">): string | null {
+  return options.sourceCodexHome ?? (options.trustedSshManagement ? null : resolveSourceCodexHome(options.environment));
 }
 
 export function trustedRuntimeReadOnlyRoots(
@@ -4522,8 +4529,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
         sourceCodexHome:
-          this.options.sourceCodexHome ??
-          resolveSourceCodexHome(this.options.environment),
+          resolveRunnerdCodexSourceHome(this.options),
         apiKey:
           this.options.environment?.CODEX_API_KEY ??
           this.options.environment?.OPENAI_API_KEY,
@@ -5420,8 +5426,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         context: sourceRuntimeContext,
         codexHome: localCodexHome,
         sourceCodexHome:
-          this.options.sourceCodexHome ??
-          resolveSourceCodexHome(this.options.environment),
+          resolveRunnerdCodexSourceHome(this.options),
         apiKey:
           this.options.environment?.CODEX_API_KEY ??
           this.options.environment?.OPENAI_API_KEY,
