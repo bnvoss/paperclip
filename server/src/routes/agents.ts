@@ -1200,6 +1200,19 @@ export function agentRoutes(
     return null;
   }
 
+  // Binding an SSH target grants the same host access as managing that target.
+  // Reuse the instance-admin boundary, independently of company config grants
+  // or profile-only payload checks. Null inherits the current instance default.
+  async function assertCanBindAgentEnvironment(
+    req: Request,
+    environmentId: string | null | undefined,
+  ) {
+    const selectedId = environmentId ?? (await instanceSettings.get()).defaultEnvironmentId;
+    if (!selectedId) return;
+    const environment = await environmentsSvc.getById(selectedId);
+    if (environment?.driver === "ssh") assertInstanceAdmin(req);
+  }
+
   /**
    * Resolve the execution target the adapter should run its test probes against.
    *
@@ -1217,6 +1230,7 @@ export function agentRoutes(
    * The caller MUST always invoke `release()` (typically in a `finally` block).
    */
   async function resolveAdapterTestExecutionContext(input: {
+    req: Request;
     companyId: string;
     adapterType: string;
     environmentId: string | null;
@@ -1298,6 +1312,9 @@ export function agentRoutes(
     }
 
     if (environment.driver === "ssh") {
+      // Recheck the actual resolved row before key/target resolution. Keep the
+      // denial outside the fallback-check catch so it cannot become a probe.
+      assertInstanceAdmin(input.req);
       try {
         const target = await resolveEnvironmentExecutionTarget({
           db,
@@ -3375,6 +3392,7 @@ export function agentRoutes(
   // environment. A same-company or an instance-global environment then gets the
   // shared driver and status validation.
   async function assertAdapterTestEnvironmentForCompany(
+    req: Request,
     companyId: string,
     environmentId: string,
   ): Promise<void> {
@@ -3390,6 +3408,7 @@ export function agentRoutes(
         code: "environment_company_mismatch",
       });
     }
+    if (environment.driver === "ssh") assertInstanceAdmin(req);
     await assertEnvironmentSelectionForCompany(environmentsSvc, companyId, environmentId, {
       allowedDrivers: ADAPTER_TEST_ALLOWED_ENVIRONMENT_DRIVERS,
     });
@@ -3460,6 +3479,8 @@ export function agentRoutes(
   }
 
   async function validateManagedAgentBinding(req: Request, companyId: string, agentId: string, adapterType: string, config: Record<string, unknown>, binding: AiRuntimeConnectionBinding, environmentId: string | null | undefined, test: boolean, newAgent = false) {
+    const testEnvironmentId = test ? await resolveAdapterTestEnvironmentId(companyId, environmentId) : null;
+    if (testEnvironmentId) await assertAdapterTestEnvironmentForCompany(req, companyId, testEnvironmentId);
     if (binding.mode === "router") {
       const settings = await import("../services/instance-settings.js");
       if (!(await settings.instanceSettingsService(db).getExperimental()).enableAiConnectionRouters) throw unprocessable("Ask your instance operator to enable AI connection routing.");
@@ -3500,9 +3521,7 @@ export function agentRoutes(
     });
     if (!selection) return undefined;
     if (test) {
-      const testEnvironmentId = await resolveAdapterTestEnvironmentId(companyId, environmentId);
-      if (testEnvironmentId) await assertAdapterTestEnvironmentForCompany(companyId, testEnvironmentId);
-      const target = await resolveAdapterTestExecutionContext({ companyId, adapterType, environmentId: testEnvironmentId });
+      const target = await resolveAdapterTestExecutionContext({ req, companyId, adapterType, environmentId: testEnvironmentId });
       let managed: Awaited<ReturnType<typeof prepareManagedAiRuntime>> | undefined;
       try {
         if (!target.executionTarget && target.fallbackChecks.length > 0) throw unprocessable("The agent environment is not available for adoption");
@@ -3542,23 +3561,23 @@ export function agentRoutes(
         await assertCanUpdateAgent(req, savedAgent);
       }
       const poolBinding = requestedBinding ?? (savedAgent?.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(savedAgent.runtimeConfig.aiConnection) : undefined);
-      if (poolBinding?.mode === "router") {
-        await validateManagedAgentBinding(req, companyId, savedAgentId ?? "", type, req.body.adapterConfig ?? {}, poolBinding, req.body.environmentId, false, !savedAgentId);
-        res.json({ adapterType: type, status: "warn", testedAt: new Date().toISOString(), checks: [{ code: "ai_connection_pool_task_test_required", level: "warn", message: "Pool configuration is available. Run a task to verify the selected account and harness; this preview does not allocate a task or contact a provider." }] });
-        return;
-      }
       const requestedEnvironmentId = await resolveAdapterTestEnvironmentId(
         companyId,
-        // Omission tests the saved selection. Explicit null tests a prospective
-        // change back to the instance default.
+        // Omission tests the saved selection. Explicit null tests the default.
         req.body.environmentId === undefined
           ? savedAgent?.defaultEnvironmentId
           : asNonEmptyString(req.body.environmentId),
       );
+      if (poolBinding?.mode === "router") {
+        await assertCanBindAgentEnvironment(req, requestedEnvironmentId);
+        await validateManagedAgentBinding(req, companyId, savedAgentId ?? "", type, req.body.adapterConfig ?? {}, poolBinding, req.body.environmentId, false, !savedAgentId);
+        res.json({ adapterType: type, status: "warn", testedAt: new Date().toISOString(), checks: [{ code: "ai_connection_pool_task_test_required", level: "warn", message: "Pool configuration is available. Run a task to verify the selected account and harness; this preview does not allocate a task or contact a provider." }] });
+        return;
+      }
       // Fail closed on a foreign environment before any secret resolution, env
       // merge, target resolution, sandbox lease, or adapter test runs.
       if (requestedEnvironmentId) {
-        await assertAdapterTestEnvironmentForCompany(companyId, requestedEnvironmentId);
+        await assertAdapterTestEnvironmentForCompany(req, companyId, requestedEnvironmentId);
       }
       // Agent reads redact every plain environment value. When this is a saved
       // agent test, restore those display-only placeholders from the
@@ -3609,6 +3628,7 @@ export function agentRoutes(
 
       const { executionTarget, environmentName, fallbackChecks, sandboxIdentityCheck, release } =
         await resolveAdapterTestExecutionContext({
+          req,
           companyId,
           adapterType: type,
           environmentId: requestedEnvironmentId,
@@ -3833,7 +3853,7 @@ export function agentRoutes(
       await assertCanCreateAgentsForCompany(req, companyId);
       const environmentId = asNonEmptyString(req.query.environmentId);
       if (environmentId) {
-        await assertAdapterTestEnvironmentForCompany(companyId, environmentId);
+        await assertAdapterTestEnvironmentForCompany(req, companyId, environmentId);
       }
       res.setHeader("Cache-Control", "no-store");
 
@@ -4468,6 +4488,8 @@ export function agentRoutes(
     if (!rollbackConfig) {
       throw unprocessable("Invalid revision snapshot");
     }
+    await assertCanBindAgentEnvironment(req,
+      typeof rollbackConfig.defaultEnvironmentId === "string" ? rollbackConfig.defaultEnvironmentId : null);
     assertProviderTraceSettingTransition(
       req,
       rollbackConfig.runtimeConfig,
@@ -4638,6 +4660,7 @@ export function agentRoutes(
       hireInput.adapterConfig = inheritNativeRunnerAdapterConfig(caller.adapterConfig);
       hireInput.defaultEnvironmentId = caller.defaultEnvironmentId ?? null;
     }
+    await assertCanBindAgentEnvironment(req, hireInput.defaultEnvironmentId);
     hireInput.adapterType = await assertSelectableAdapterType(hireInput.adapterType);
     const rawHireAdapterConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, hireInput.runtimeConfig);
@@ -4949,6 +4972,7 @@ export function agentRoutes(
       onboardingFirstAgent: createOnboardingFirstAgent,
       ...createInput
     } = req.body;
+    await assertCanBindAgentEnvironment(req, createInput.defaultEnvironmentId);
     createInput.adapterType = await assertSelectableAdapterType(createInput.adapterType);
     const rawCreateAdapterConfig = (createInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertProviderTraceSettingTransition(req, createInput.runtimeConfig);
@@ -5551,6 +5575,10 @@ export function agentRoutes(
     if (hasOwn(req.body as object, "permissions")) {
       res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
       return;
+    }
+
+    if (hasOwn(req.body as object, "defaultEnvironmentId")) {
+      await assertCanBindAgentEnvironment(req, req.body.defaultEnvironmentId);
     }
 
     const patchData = { ...(req.body as Record<string, unknown>) };

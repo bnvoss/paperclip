@@ -830,6 +830,14 @@ user, and host-key policy in the SSH environment itself. A connection without an
 explicit private key retains its existing SSH configuration and authentication
 mode.
 
+Selecting an SSH environment for an agent requires instance-admin authority.
+This includes create, hire, default-environment updates, and restoration from a
+configuration revision. SSH adapter tests require the same authority before
+credential or target preparation, including saved and inherited selections.
+Company configuration grants do not grant this host access. Creating an SSH
+environment does not change the instance default or replace the Local row.
+Already admitted runs keep their ordinary execution and Stop controls.
+
 These launch changes do not add remote process ownership or recovery. An SSH
 client exit, timeout, or disconnect alone does not prove that a remote provider
 or its descendants stopped.

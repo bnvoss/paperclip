@@ -65,10 +65,13 @@ const mockApprovalService = vi.hoisted(() => ({
 }));
 
 const mockInstanceSettingsService = vi.hoisted(() => ({
-  get: vi.fn(async () => ({ defaultEnvironmentId: null })),
+  get: vi.fn(async () => ({ defaultEnvironmentId: null as string | null })),
   getGeneral: vi.fn(async () => ({ censorUsernameInLogs: false })),
   getExperimental: vi.fn(async () => ({ enableNativeRunner: false })),
 }));
+
+const mockEnvironmentService = vi.hoisted(() => ({ getById: vi.fn() }));
+vi.mock("../services/environments.js", () => ({ environmentService: () => mockEnvironmentService }));
 
 const mockManagedAgentProfileService = vi.hoisted(() => ({
   requireQualified: vi.fn(),
@@ -114,6 +117,7 @@ vi.mock("../services/remote-agent-profiles.js", () => ({
 }));
 
 function registerModuleMocks() {
+  vi.doMock("../services/environments.js", () => ({ environmentService: () => mockEnvironmentService }));
   vi.doMock("../services/index.js", () => ({
     agentService: () => mockAgentService,
     agentInstructionsService: () => mockAgentInstructionsService,
@@ -173,7 +177,7 @@ const externalAdapter: ServerAdapterModule = {
 
 const missingAdapterType = "missing_adapter_validation_test";
 
-async function createApp() {
+async function createApp(actorOverrides: Record<string, unknown> = {}) {
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -187,6 +191,7 @@ async function createApp() {
       companyIds: ["company-1"],
       source: "local_implicit",
       isInstanceAdmin: false,
+      ...actorOverrides,
     };
     next();
   });
@@ -263,6 +268,8 @@ describe("agent routes adapter validation", () => {
     mockLogActivity.mockResolvedValue(undefined);
     mockSecretService.syncEnvBindingsForTarget.mockResolvedValue(undefined);
     mockInstanceSettingsService.getExperimental.mockResolvedValue({ enableNativeRunner: false });
+    mockInstanceSettingsService.get.mockResolvedValue({ defaultEnvironmentId: null });
+    mockEnvironmentService.getById.mockReset();
     mockManagedAgentProfileService.requireQualified.mockResolvedValue({
       id: "managed-primary",
       companyId: "company-1",
@@ -336,6 +343,93 @@ describe("agent routes adapter validation", () => {
   afterEach(async () => {
     await unregisterTestAdapter("external_test");
     await unregisterTestAdapter(missingAdapterType);
+  });
+
+  const sshId = "77777777-7777-4777-8777-777777777777";
+  const agentActor = { type: "agent", source: "agent_key", agentId: "11111111-1111-4111-8111-111111111111", companyId: "company-1" };
+  const nonAdminBoard = { source: "session", isInstanceAdmin: false };
+
+  it.each([agentActor, nonAdminBoard])("requires instance admin for SSH binding even with ordinary config grants (%j)", async (actor) => {
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    const app = await createApp(actor);
+    for (const mixed of [false, true]) {
+      const response = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111")
+        .send({ defaultEnvironmentId: sshId, ...(mixed ? { name: "Mixed update" } : {}) }));
+      expect(response.status, JSON.stringify(response.body)).toBe(403);
+      expect(response.body.error).toMatch(/Board access required|Instance admin access required/);
+    }
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
+  });
+
+  it.each([agentActor, nonAdminBoard])("denies create and hire SSH bindings before preparation (%j)", async (actor) => {
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    const app = await createApp(actor);
+    for (const route of ["agents", "agent-hires"]) {
+      const response = await requestApp(app, url => request(url).post(`/api/companies/company-1/${route}`)
+        .send({ name: "Synthetic", role: "engineer", adapterType: "codex_local", defaultEnvironmentId: sshId }));
+      expect(response.status, JSON.stringify(response.body)).toBe(403);
+      expect(response.body.error).toMatch(/Board access required|Instance admin access required/);
+    }
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
+    expect(mockCompanySkillService.resolveRequestedSkillKeys).not.toHaveBeenCalled();
+  });
+
+  it("allows the instance administrator to bind SSH and preserves non-SSH agent configuration", async () => {
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    const admin = await createApp({ source: "session", isInstanceAdmin: true });
+    const response = await requestApp(admin, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ defaultEnvironmentId: sshId }));
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ defaultEnvironmentId: sshId }), expect.anything());
+    mockAgentService.update.mockClear();
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "local", status: "active", config: {} });
+    const agent = await createApp(agentActor);
+    const local = await requestApp(agent, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ defaultEnvironmentId: sshId }));
+    expect(local.status, JSON.stringify(local.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledOnce();
+  });
+
+  it("protects SSH instance-default inheritance when an ordinary actor clears the override", async () => {
+    mockInstanceSettingsService.get.mockResolvedValue({ defaultEnvironmentId: sshId });
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    const app = await createApp(agentActor);
+    const response = await requestApp(app, url => request(url).patch("/api/agents/11111111-1111-4111-8111-111111111111").send({ defaultEnvironmentId: null, name: "Mixed inherited target" }));
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts instance-admin create and hire bindings to SSH", async () => {
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    const app = await createApp({ source: "session", isInstanceAdmin: true });
+    for (const route of ["agents", "agent-hires"]) {
+      const response = await requestApp(app, url => request(url).post(`/api/companies/company-1/${route}`)
+        .send({ name: "Synthetic admin binding", role: "engineer", adapterType: "codex_local", defaultEnvironmentId: sshId }));
+      expect(response.status, JSON.stringify(response.body)).toBe(201);
+    }
+    expect(mockAgentService.create).toHaveBeenCalledTimes(2);
+    for (const call of mockAgentService.create.mock.calls) expect(call[1].defaultEnvironmentId).toBe(sshId);
+  });
+
+  it("does not let an SSH-bound agent propagate that binding through caller inheritance", async () => {
+    mockAgentService.getById.mockResolvedValue({ ...(await mockAgentService.getById()), adapterType: "paperclip_runner", adapterConfig: { provider: "codex", codexPermissionMode: "never" }, defaultEnvironmentId: sshId });
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    const app = await createApp(agentActor);
+    const response = await requestApp(app, url => request(url).post("/api/companies/company-1/agent-hires").send({ name: "Inherited SSH", role: "engineer", adapterType: "paperclip_runner", inheritRuntimeFrom: "caller" }));
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(response.body.error).toBe("Board access required");
+    expect(mockAgentService.create).not.toHaveBeenCalled();
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
+  });
+
+  it("does not restore an SSH binding from a config revision without instance-admin authority", async () => {
+    mockEnvironmentService.getById.mockResolvedValue({ id: sshId, driver: "ssh", status: "active", config: {} });
+    mockAgentService.getConfigRevision.mockResolvedValue({ afterConfig: { ...(await mockAgentService.getById()), defaultEnvironmentId: sshId } });
+    const app = await createApp(agentActor);
+    const response = await requestApp(app, url => request(url).post("/api/agents/11111111-1111-4111-8111-111111111111/config-revisions/33333333-3333-4333-8333-333333333333/rollback").send({}));
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
   });
 
   it("selects and refreshes the runner provider catalog independently", async () => {
