@@ -156,7 +156,7 @@ function mockManagedRuntime(method: "api_key" | "subscription") {
   );
 }
 
-async function createApp() {
+async function createApp(actorOverrides: Record<string, unknown> = {}) {
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -170,6 +170,7 @@ async function createApp() {
       companyIds: ["company-1"],
       source: "local_implicit",
       isInstanceAdmin: false,
+      ...actorOverrides,
     };
     next();
   });
@@ -246,6 +247,54 @@ describe("agent test-environment route", () => {
 
   afterEach(async () => {
     await unregisterTestAdapter("external_test");
+  });
+
+  it.each([
+    { type: "agent", source: "agent_key", agentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", companyId: "company-1" },
+    { source: "session", isInstanceAdmin: false },
+  ])("denies explicit, saved, and inherited SSH tests before credential or target work (%j)", async (actor) => {
+    const environmentId = "11111111-1111-4111-8111-111111111111";
+    const agentId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    mockEnvironmentService.getById.mockResolvedValue({ id: environmentId, driver: "ssh", status: "active", config: {} });
+    mockAgentService.getById.mockResolvedValue({ id: agentId, companyId: "company-1", adapterType: "external_test", adapterConfig: {}, runtimeConfig: {}, defaultEnvironmentId: environmentId });
+    mockInstanceSettingsService.get.mockResolvedValue({ defaultEnvironmentId: environmentId });
+    const app = await createApp(actor);
+    for (const selection of [{ environmentId }, { agentId }, { environmentId: null }, {}]) {
+      const response = await request(app).post("/api/companies/company-1/adapters/external_test/test-environment").send({ adapterConfig: {}, ...selection });
+      expect(response.status, JSON.stringify(response.body)).toBe(403);
+      expect(response.body.error).toMatch(/Board access required|Instance admin access required/);
+    }
+    expect(mockSecretService.normalizeAdapterConfigForPersistence).not.toHaveBeenCalled();
+    expect(mockSecretService.resolveAdapterConfigForRuntime).not.toHaveBeenCalled();
+    expect(mockPrepareManagedAiRuntime).not.toHaveBeenCalled();
+    expect(mockResolveEnvironmentExecutionTarget).not.toHaveBeenCalled();
+    expect(mockEnvironmentRuntime.acquireRunLease).not.toHaveBeenCalled();
+    expect(testEnvironmentSpy).not.toHaveBeenCalled();
+    expect(mockValidateAiApiKey).not.toHaveBeenCalled();
+  });
+
+  it("allows an instance-admin SSH test without changing the selected/default environment", async () => {
+    const environmentId = "11111111-1111-4111-8111-111111111111";
+    mockEnvironmentService.getById.mockResolvedValue({ id: environmentId, name: "Synthetic SSH", driver: "ssh", status: "active", config: {} });
+    const target = { kind: "remote", transport: "ssh", remoteCwd: "/synthetic/workspace", spec: {} };
+    mockResolveEnvironmentExecutionTarget.mockResolvedValue(target);
+    const app = await createApp({ source: "session", isInstanceAdmin: true });
+    const response = await request(app).post("/api/companies/company-1/adapters/external_test/test-environment").send({ environmentId, adapterConfig: {} });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(testEnvironmentSpy).toHaveBeenCalledWith(expect.objectContaining({ executionTarget: target }));
+    expect(mockEnvironmentRuntime.acquireRunLease).not.toHaveBeenCalled();
+  });
+
+  it("denies an SSH pool preview before selecting or preparing a connection", async () => {
+    const environmentId = "11111111-1111-4111-8111-111111111111";
+    mockEnvironmentService.getById.mockResolvedValue({ id: environmentId, driver: "ssh", status: "active", config: {} });
+    const app = await createApp({ source: "session", isInstanceAdmin: false });
+    const response = await request(app).post("/api/companies/company-1/adapters/external_test/test-environment").send({ environmentId, aiConnection: { mode: "router", connectionId: "22222222-2222-4222-8222-222222222222" }, adapterConfig: {} });
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(response.body.error).toBe("Instance admin access required");
+    expect(mockPrepareManagedAiRuntime).not.toHaveBeenCalled();
+    expect(mockResolveEnvironmentExecutionTarget).not.toHaveBeenCalled();
+    expect(testEnvironmentSpy).not.toHaveBeenCalled();
   });
 
   it("tests the instance default sandbox when the agent inherits its environment", async () => {
