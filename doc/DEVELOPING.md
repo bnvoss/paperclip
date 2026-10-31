@@ -820,6 +820,8 @@ header is internal transport data; it must not be saved as prompt metadata.
 The target needs a POSIX shell and `base64 -d`. Login profiles still supply PATH,
 but cannot read the input header. Profile-enabled tracing is disabled before
 the environment is read.
+Control commands keep their full argument list, including the shell positional
+parameters used by Runner launch and process-identity checks.
 
 An explicit private key selects dedicated-key authentication. That path ignores
 ambient SSH client configuration, uses only the staged key, disables the SSH

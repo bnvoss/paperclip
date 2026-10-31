@@ -58,11 +58,7 @@ export function createSshCommandManagedRuntimeRunner(input: {
       const command = commandInput.command.trim();
       const args = commandInput.args ?? [];
       const cwd = commandInput.cwd?.trim() || defaultCwd;
-      const commandScript = command === "sh" || command === "bash"
-        ? (args[0] === "-c" || args[0] === "-lc") && typeof args[1] === "string"
-          ? args[1]
-          : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`
-        : `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
+      const commandScript = `exec ${[shellQuote(command), ...args.map((arg) => shellQuote(arg))].join(" ")}`;
       const remoteCommand = `cd ${shellQuote(cwd)} && ${commandScript}`;
 
       try {

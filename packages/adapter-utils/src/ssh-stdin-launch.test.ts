@@ -259,6 +259,19 @@ describe.skipIf(process.platform === "win32")("SSH confidential environment stdi
     await verify(f, "bridge input", logs.join(""));
   });
 
+  it("preserves shell positional arguments used by remote runner launch and identity controls", async () => {
+    const f = await fixture();
+    const runner = createSshCommandManagedRuntimeRunner({ spec: f.spec });
+    const result = await runner.execute({
+      command: "sh",
+      args: ["-c", 'exec "$1" "$2" "$3"', "paperclip-runner-monitor", process.execPath, f.inspector, "23"],
+      env: launchEnv,
+      stdin: "native control input",
+    });
+    expect(result.exitCode).toBe(23);
+    await verify(f, "native control input", result.stdout + result.stderr);
+  });
+
   it.each([undefined, "the original prompt\n"])(
     "keeps runChildProcess prompt metadata separate and streams normal program output (%#)",
     async (input) => {
