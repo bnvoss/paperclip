@@ -65,6 +65,8 @@ fn provider_config(directory: &Path, switches: &[&str]) -> CodexProviderConfig {
         instructions: "Stay inside the test workspace.".to_owned(),
         approval_policy: "never".to_owned(),
         externally_sandboxed: false,
+        trusted_ssh_management: false,
+        execution_target_fingerprint: None,
         include_skill_instructions: None,
         conversation_mode: None,
     }
@@ -6505,5 +6507,263 @@ fn skill_flag_can_be_added_to_an_old_checkpoint_at_settled_run_attach() {
         resume["params"]["config"]["skills.include_instructions"],
         true
     );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn trusted_ssh_management_uses_its_named_profile_on_start_turn_and_resume() {
+    let directory = temporary_directory("trusted-ssh-management");
+    let mut config = provider_config(
+        &directory,
+        &[
+            "--require-permission-profile",
+            "paperclip-runner-trusted-ssh-management-v1",
+        ],
+    );
+    config.trusted_ssh_management = true;
+    config.execution_target_fingerprint = Some(format!("sha256:{}", "a".repeat(64)));
+    let mut provider = CodexProvider::start(&config, None).expect("start trusted SSH profile");
+    provider
+        .start_turn("Synthetic host management operation.", &config.cwd)
+        .expect("trusted turn profile");
+    wait_for_notification(&mut provider, "turn/completed");
+    provider.shutdown().expect("stop synthetic provider");
+    let mut resumed = CodexProvider::start(&config, Some("codex-thread-1"))
+        .expect("resume exact trusted profile");
+    resumed
+        .start_turn("Continue synthetic operation.", &config.cwd)
+        .expect("resumed trusted turn");
+    resumed.shutdown().expect("stop resumed synthetic provider");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn permission_and_target_changes_cannot_attach_to_a_retained_trusted_provider() {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("trusted_profile_attach_subprocess")
+        .arg("--exact")
+        .arg("--ignored")
+        .env(
+            "PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT",
+            format!("sha256:{}", "a".repeat(64)),
+        )
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+#[ignore = "isolated target-profile launch environment"]
+fn trusted_profile_attach_subprocess() {
+    let directory = temporary_directory("trusted-ssh-attach-fence");
+    let mut config = provider_config(&directory, &[]);
+    config.trusted_ssh_management = true;
+    config.execution_target_fingerprint = Some(format!("sha256:{}", "a".repeat(64)));
+    let mut executor =
+        CodexCommandExecutor::with_runner_config(&directory, &durable_config(&directory));
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({"provider": config}),
+        ))
+        .unwrap();
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .unwrap();
+    for _ in 0..8 {
+        poll_and_ack(&mut executor).unwrap();
+    }
+    for (index, mut changed) in [config.clone(), config.clone(), config.clone()]
+        .into_iter()
+        .enumerate()
+    {
+        match index {
+            0 => changed.trusted_ssh_management = false,
+            1 => changed.execution_target_fingerprint = Some(format!("sha256:{}", "b".repeat(64))),
+            _ => {
+                changed.trusted_ssh_management = false;
+                changed.externally_sandboxed = true;
+            }
+        }
+        let error = executor
+            .execute(&command(
+                &format!("attach-{index}"),
+                3 + index as u64,
+                "run.attach",
+                json!({"provider": changed}),
+            ))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot change the durable Codex provider profile"));
+    }
+    executor.shutdown().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn external_sandbox_environment_cannot_broaden_a_confined_provider() {
+    let directory = temporary_directory("external-env-spoof");
+    let test_binary = std::env::current_exe().unwrap();
+    let status = std::process::Command::new(test_binary)
+        .arg("external_sandbox_environment_spoof_subprocess")
+        .arg("--exact")
+        .arg("--ignored")
+        .env("PAPERCLIP_SSH_SPOOF_TEST_DIRECTORY", &directory)
+        .env("PAPERCLIP_RUNNER_EXTERNAL_SANDBOX", "1")
+        .env("PAPERCLIP_RUNNER_TRUSTED_SSH_MANAGEMENT", "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+#[ignore = "isolated environment spoof subprocess"]
+fn external_sandbox_environment_spoof_subprocess() {
+    let directory = PathBuf::from(std::env::var_os("PAPERCLIP_SSH_SPOOF_TEST_DIRECTORY").unwrap());
+    let config = provider_config(
+        &directory,
+        &[
+            "--require-permission-profile",
+            "paperclip-runner-workspace-only",
+        ],
+    );
+    let mut provider =
+        CodexProvider::start(&config, None).expect("ambient flag must leave profile confined");
+    provider
+        .start_turn("Synthetic confined operation.", &config.cwd)
+        .unwrap();
+    provider.shutdown().unwrap();
+}
+
+#[test]
+fn changed_target_cold_restore_rejects_before_reopening_the_old_trusted_provider() {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("trusted_profile_cold_restore_subprocess")
+        .arg("--exact")
+        .arg("--ignored")
+        .env(
+            "PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT",
+            format!("sha256:{}", "a".repeat(64)),
+        )
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+#[ignore = "isolated cold restore launch environment"]
+fn trusted_profile_cold_restore_subprocess() {
+    let directory = temporary_directory("trusted-ssh-cold-fence");
+    let mut config = provider_config(&directory, &["--record-process-start"]);
+    config.trusted_ssh_management = true;
+    config.execution_target_fingerprint = Some(format!("sha256:{}", "a".repeat(64)));
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({"provider": config}),
+        ))
+        .unwrap();
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .unwrap();
+    for _ in 0..8 {
+        poll_and_ack(&mut executor).unwrap();
+    }
+    executor.shutdown().unwrap();
+    assert_eq!(call_count(&directory, "process-start"), 1);
+    // The stored configuration remains exact. Only fresh launch authority changes.
+    for expected in [Some(format!("sha256:{}", "b".repeat(64))), None] {
+        if let Some(expected) = expected {
+            std::env::set_var("PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT", expected);
+        } else {
+            std::env::remove_var("PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT");
+        }
+        let mut restored = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+        let error = restored
+            .execute(&command("probe", 3, "runner.drain", json!({})))
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("target profile changed before provider recovery"));
+        assert_eq!(
+            call_count(&directory, "process-start"),
+            1,
+            "rejected restore must not spawn a provider"
+        );
+    }
+    std::env::set_var(
+        "PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT",
+        format!("sha256:{}", "a".repeat(64)),
+    );
+    let mut matching = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    matching
+        .execute(&command("matching", 4, "runner.drain", json!({})))
+        .unwrap();
+    assert_eq!(
+        call_count(&directory, "process-start"),
+        2,
+        "matching authority may reopen the same provider"
+    );
+    matching.shutdown().unwrap();
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn legacy_confined_local_restore_allows_absent_optional_target_fields() {
+    let directory = temporary_directory("legacy-local-profile");
+    let config = provider_config(
+        &directory,
+        &[
+            "--record-process-start",
+            "--require-permission-profile",
+            "paperclip-runner-workspace-only",
+        ],
+    );
+    let runner_config = durable_config(&directory);
+    let mut executor = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    executor
+        .execute(&command(
+            "prepare",
+            1,
+            "run.prepare",
+            json!({"provider": config}),
+        ))
+        .unwrap();
+    executor
+        .execute(&command("open", 2, "session.open", json!({})))
+        .unwrap();
+    for _ in 0..8 {
+        poll_and_ack(&mut executor).unwrap();
+    }
+    executor.shutdown().unwrap();
+    let path = directory.join("codex-provider-state.json");
+    let mut persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    persisted["config"]
+        .as_object_mut()
+        .unwrap()
+        .remove("trustedSshManagement");
+    persisted["config"]
+        .as_object_mut()
+        .unwrap()
+        .remove("executionTargetFingerprint");
+    fs::write(&path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+    let mut restored = CodexCommandExecutor::with_runner_config(&directory, &runner_config);
+    restored
+        .execute(&command("legacy-probe", 3, "runner.drain", json!({})))
+        .unwrap();
+    assert_eq!(
+        call_count(&directory, "process-start"),
+        2,
+        "legacy confined Local state must remain recoverable"
+    );
+    restored.shutdown().unwrap();
     fs::remove_dir_all(directory).unwrap();
 }

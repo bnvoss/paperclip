@@ -120,6 +120,7 @@ fn build_metadata() -> serde_json::Value {
         "packageVersion": env!("CARGO_PKG_VERSION"),
         "binaryContractVersion": 2,
         "durableSessionCapabilities": ["unlimited_runtime", "connection_lease_renewal"],
+        "codexPermissionProfiles": ["paperclip-runner-trusted-ssh-management-v1"],
         "nativeExecutionVersion": 1,
         "harnessDriverVersion": 1,
         "prp": {
@@ -448,6 +449,10 @@ mod tests {
         assert_eq!(
             metadata["durableSessionCapabilities"],
             json!(["unlimited_runtime", "connection_lease_renewal"])
+        );
+        assert_eq!(
+            metadata["codexPermissionProfiles"],
+            json!(["paperclip-runner-trusted-ssh-management-v1"])
         );
         assert_eq!(
             metadata["prpTransportModes"],

@@ -1,3 +1,4 @@
+import { trustedSshLaunchEffectsChanged } from "../services/native-runtime/trusted-ssh-launch-effects.js";
 import { aiConnectionRouterService, poolMemberRuntimeConfig } from "../services/ai-connection-router.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { completeConnectionIntentSchema } from "@paperclipai/shared";
@@ -1211,6 +1212,18 @@ export function agentRoutes(
     if (!selectedId) return;
     const environment = await environmentsSvc.getById(selectedId);
     if (environment?.driver === "ssh") assertInstanceAdmin(req);
+  }
+
+  // Preserve ordinary owner/consent methods. Only an effective change to the
+  // native execution boundary or an executable hook needs the admitting admin.
+  async function assertTrustedAgentLaunchChangeAdmin(req: Request,
+    agent: { id: string; adapterType: string; adapterConfig: unknown; defaultEnvironmentId?: string | null },
+    nextAdapterType: string, nextAdapterConfig: unknown) {
+    if (!trustedSshLaunchEffectsChanged(agent.adapterType, agent.adapterConfig, nextAdapterType, nextAdapterConfig)) return;
+    const selectedId = agent.defaultEnvironmentId ?? (await instanceSettings.get()).defaultEnvironmentId;
+    if (!selectedId) return;
+    const environment = await environmentsSvc.getById(selectedId);
+    if (environment?.driver === "ssh" && asRecord(environment.config)?.trustedManagement === true) assertInstanceAdmin(req);
   }
 
   /**
@@ -4504,6 +4517,7 @@ export function agentRoutes(
       await assertSelectableAdapterType(rollbackAdapterType);
     }
     const rollbackAdapterConfig = asRecord(rollbackConfig.adapterConfig) ?? {};
+    await assertTrustedAgentLaunchChangeAdmin(req, existing, rollbackAdapterType, rollbackAdapterConfig);
     assertNoAgentAdapterConfigMutation(req, rollbackAdapterConfig);
     assertNoAgentLocalAdapterHostCommandMutation(req, rollbackAdapterType, rollbackAdapterConfig);
     assertNoAgentProcessAdapterMutation(
@@ -5678,6 +5692,7 @@ export function agentRoutes(
       if (requestedAdapterType === "paperclip_runner") {
         rawEffectiveAdapterConfig = normalizePaperclipRunnerAdapterConfig(requestedAdapterType, rawEffectiveAdapterConfig);
       }
+      await assertTrustedAgentLaunchChangeAdmin(req, existing, requestedAdapterType, rawEffectiveAdapterConfig);
       if (changingAdapterType || requestedAdapterConfig) {
         assertNoAgentLocalAdapterHostCommandMutation(
           req,

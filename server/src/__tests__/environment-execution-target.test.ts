@@ -395,6 +395,15 @@ describe("resolveEnvironmentExecutionTarget", () => {
     });
   });
 
+  it.each([false, true])("projects saved trusted management only for the native Runner (trusted=%s)", async trustedManagement => {
+    mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({ driver: "ssh", config: {
+      host: "ssh.example.test", port: 22, username: "operator", remoteWorkspacePath: "/srv/paperclip",
+      privateKey: null, knownHosts: null, strictHostKeyChecking: true, trustedManagement } });
+    const input = { db: {} as never, companyId: "company-1", adapterType: "paperclip_runner", environment: { id: "env-1", driver: "ssh" as const, config: {} }, leaseId: null, leaseMetadata: {}, lease: null, environmentRuntime: null };
+    expect(await resolveEnvironmentExecutionTarget(input)).toMatchObject({ transport: "ssh", trustedManagement });
+    if (trustedManagement) await expect(resolveEnvironmentExecutionTarget({ ...input, adapterType: "codex_local" })).rejects.toThrow("requires_native_codex_runner");
+  });
+
   it("resolves SSH execution targets in bridge mode", async () => {
     mockResolveEnvironmentDriverConfigForRuntime.mockResolvedValue({
       driver: "ssh",

@@ -67,6 +67,7 @@ import { RUNNERD_CANONICAL_ITEM } from "../drivers/codex/codex-driver-values.js"
 
 import {
   parseAcpxTurnControlCapabilities,
+  assertSavedRunnerdExecutionProfile,
   authorizedToolSetForProvider,
   createCapabilityRunnerdCodexTransport,
   createCapabilityRunnerdProviderEnvironment,
@@ -7635,4 +7636,79 @@ it("preserves prepared input and completion feedback through runnerd and the rea
     removeRoot: () => rm(root, { recursive: true, force: true }),
     evidence: () => bundle.evidence(),
   });
+}, 30_000);
+
+
+it("admits trusted SSH launch args only through the explicit transport option", () => {
+  const input = { environment: { PAPERCLIP_RUNNER_EXTERNAL_SANDBOX: "1", PAPERCLIP_RUNNER_TRUSTED_SSH_MANAGEMENT: "1" }, codexHome: "/isolated/codex" };
+  expect(createRunnerdCodexAppServerArgs(input).join("\n")).toContain('default_permissions="paperclip-runner-workspace-only"');
+  expect(createRunnerdCodexAppServerArgs({ ...input, trustedSshManagement: true }).join("\n")).toContain('default_permissions="paperclip-runner-trusted-ssh-management-v1"');
+  expect(() => createRunnerdCodexAppServerArgs({ ...input, trustedSshManagement: true, externallySandboxed: true })).toThrow("conflicting_codex_execution_permissions");
+});
+
+
+it("rejects stale trusted templates before live adoption or cold restore", () => {
+  const fingerprint = `sha256:${"a".repeat(64)}`;
+  const options = { provider: "codex" as const, trustedSshManagement: true, executionTargetFingerprint: fingerprint };
+  const saved = { runAttachTemplate: { provider: { provider: "codex", trustedSshManagement: true, externallySandboxed: false, executionTargetFingerprint: fingerprint } } };
+  expect(() => assertSavedRunnerdExecutionProfile(options, saved)).not.toThrow();
+  for (const changed of [{ ...options, trustedSshManagement: false }, { ...options, executionTargetFingerprint: `sha256:${"b".repeat(64)}` }, { ...options, executionTargetFingerprint: null }]) {
+    expect(() => assertSavedRunnerdExecutionProfile(changed, saved)).toThrow("execution_target_profile_mismatch");
+  }
+  expect(() => assertSavedRunnerdExecutionProfile(options, { runAttachTemplate: { provider: { provider: "codex" } } })).toThrow("profile_mismatch");
+});
+
+it("overwrites a configured restore fingerprint with the structured controller value", () => {
+  const input = { provider: "codex" as const, identity: { runnerInstanceId: "runner", environmentLeaseId: "lease", runId: "run", normalizedSessionId: "session", turnId: "turn", itemId: "item" }, codexHome: "/isolated/codex", runtimeContextPath: "/isolated/context", hasRuntimeContext: false };
+  const environment = { PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT: "forged" };
+  expect(createCapabilityRunnerdProviderEnvironment({ ...input, options: { environment } }).PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT).toBe("");
+  const fingerprint = `sha256:${"a".repeat(64)}`;
+  expect(createCapabilityRunnerdProviderEnvironment({ ...input, options: { environment, executionTargetFingerprint: fingerprint } }).PAPERCLIP_RUNNER_EXECUTION_TARGET_FINGERPRINT).toBe(fingerprint);
+});
+
+it("runs and stops the trusted profile through the driver, actual Runner and synthetic provider", async () => {
+  const stateDirectory = await mkdtemp(join(tmpdir(), "runnerd-trusted-ssh-profile-"));
+  const workspace = join(stateDirectory, "workspace");
+  const sourceHome = join(stateDirectory, "source-home");
+  await mkdir(workspace); await mkdir(sourceHome);
+  const fingerprint = `sha256:${"a".repeat(64)}`;
+  const prpIdentity = { runnerInstanceId: "trusted-source-runner", environmentLeaseId: "trusted-source-lease",
+    runId: "trusted-source-test", normalizedSessionId: "trusted-source-session", turnId: "trusted-source-turn", itemId: "trusted-source-item" };
+  const environment = { PATH: "/usr/bin:/bin", HOME: join(stateDirectory, "host-home"), CODEX_HOME: sourceHome, PAPERCLIP_WORKSPACE_CWD: workspace };
+  const bundle = createCapabilityRunnerdCodexTransport({
+    runnerBinary: defaultCapabilityRunnerdBinary(), codexCommand: fakeCodex,
+    trustedSshManagement: true, executionTargetFingerprint: fingerprint,
+    sourceCodexHome: sourceHome, environment, stateDirectory, prpIdentity,
+    codexArgs: [...createRunnerdCodexAppServerArgs({ environment, codexHome: join(stateDirectory, "codex-home"), trustedSshManagement: true }),
+      ...fakeCodexArgs(stateDirectory, "--hold-turn", "--require-permission-profile", "paperclip-runner-trusted-ssh-management-v1")],
+  });
+  const driver = new CodexAppServerDriver({ taskEnvelope: createCodexTaskEnvelope({ objective: "Exercise a synthetic trusted operation and owned Stop." }),
+    approvalPolicy: "never", permissionMode: "trusted-ssh-management", environment, transportFactory: () => bundle.transport });
+  let session: Awaited<ReturnType<typeof driver.openSession>> | null = null;
+  try {
+    session = await driver.openSession({ runId: "trusted-source-test", normalizedSessionId: "trusted-source-session", workingDirectory: workspace });
+    const turn = await session.startTurn({ message: { role: "user", text: "Hold this synthetic operation until Stop." } });
+    const persisted = JSON.parse(await readFile(join(stateDirectory, "runner", "codex-provider-state.json"), "utf8"));
+    expect(persisted.config).toMatchObject({ trustedSshManagement: true, externallySandboxed: false, executionTargetFingerprint: fingerprint });
+    await session.interrupt({ turnId: turn.turnId, reason: "Synthetic owned Stop" });
+    const events: string[] = [];
+    for await (const event of session.events()) {
+      events.push(event.eventType);
+      if (["turn.interrupted", "session.failed"].includes(event.eventType)) break;
+    }
+    expect(events).toContain("turn.interrupted"); expect(events).not.toContain("session.failed");
+    await session.close();
+    const launcher = vi.fn(() => { throw new Error("mismatched restore must not launch a runner"); });
+    const changed = createCapabilityRunnerdCodexTransport({ runnerBinary: defaultCapabilityRunnerdBinary(), codexCommand: fakeCodex,
+      stateDirectory, sourceCodexHome: sourceHome, environment, prpIdentity, trustedSshManagement: false,
+      executionTargetFingerprint: `sha256:${"b".repeat(64)}`, runnerProcessLauncher: launcher });
+    try {
+      await expect(changed.transport.request("thread/read", {})).rejects.toThrow("execution_target_profile_mismatch");
+      expect(launcher).not.toHaveBeenCalled();
+    } finally { await changed.transport.close(); }
+  } finally {
+    if (session) await session.close(); else await bundle.transport.close();
+    if (bundle.evidence().runnerExited) await rm(stateDirectory, { recursive: true, force: true });
+  }
+  expect(bundle.evidence().runnerExited).toBe(true);
 }, 30_000);

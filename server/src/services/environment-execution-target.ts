@@ -643,6 +643,10 @@ export async function resolveEnvironmentExecutionTarget(input: {
     return null;
   }
 
+  if (parsed.config.trustedManagement === true && input.adapterType !== "paperclip_runner") {
+    throw new Error("trusted_ssh_management_requires_native_codex_runner");
+  }
+
   const remoteCwd =
     typeof input.leaseMetadata?.remoteCwd === "string" && input.leaseMetadata.remoteCwd.trim().length > 0
       ? input.leaseMetadata.remoteCwd.trim()
@@ -654,6 +658,7 @@ export async function resolveEnvironmentExecutionTarget(input: {
     environmentId: input.environment.id ?? null,
     leaseId: input.leaseId ?? null,
     remoteCwd,
+    trustedManagement: parsed.config.trustedManagement === true,
     spec: {
       host: parsed.config.host,
       port: parsed.config.port,

@@ -838,6 +838,12 @@ Company configuration grants do not grant this host access. Creating an SSH
 environment does not change the instance default or replace the Local row.
 Already admitted runs keep their ordinary execution and Stop controls.
 
+Native Codex Runner can separately opt into trusted SSH host management through
+`config.trustedManagement: true` on the instance-admin SSH environment. It is off
+by default and is not an adapter environment variable. See
+[Trusted SSH management](trusted-ssh-management.md) for the permission boundary,
+required rebuilt artifacts, owner editing paths, and resume/revocation behavior.
+
 These launch changes do not add remote process ownership or recovery. An SSH
 client exit, timeout, or disconnect alone does not prove that a remote provider
 or its descendants stopped.

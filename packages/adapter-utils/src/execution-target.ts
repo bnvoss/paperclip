@@ -142,6 +142,8 @@ export interface AdapterSshExecutionTarget extends AdapterExecutionTargetWorkspa
   leaseId?: string | null;
   remoteCwd: string;
   spec: SshRemoteExecutionSpec;
+  /** Server-resolved authority. Deliberately discarded by generic target parsing. */
+  trustedManagement?: boolean;
 }
 
 /**

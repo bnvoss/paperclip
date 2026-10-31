@@ -333,6 +333,7 @@ describe("Codex resume accounting through the production driver", () => {
     const transport = new FakeCodexTransport();
     const session = await makeDriver([transport], {
       conversationMode: "direct",
+      permissionMode: "external-sandbox",
       environment: {
         PATH: "/bin",
         HOME: "/isolated/home",

@@ -1914,6 +1914,25 @@ describe("CompanyEnvironments — test provider button", () => {
     });
   });
 
+  it.each([undefined, false, true])("preserves the visible SSH trusted-management choice on save (trusted=%s)", async trustedManagement => {
+    mockEnvironmentsApi.list.mockResolvedValue([{ id: "env-1", name: "Synthetic SSH", driver: "ssh", description: null, config: { host: "ssh.example.test", username: "operator", remoteWorkspacePath: "/srv/workspace", trustedManagement }, envVars: {} }]);
+    root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => { root!.render(renderCompanyEnvironments(queryClient, `${ENVIRONMENTS_PATH}/env-1/edit`)); });
+    await waitForAssertion(() => expect(getEnvironmentFormPage()?.querySelector('[data-testid="ssh-trusted-management"]')).not.toBeNull());
+    const page = getEnvironmentFormPage()!;
+    const toggle = page.querySelector<HTMLButtonElement>('[data-testid="ssh-trusted-management"]')!;
+    expect(toggle.getAttribute("aria-label")).toBe("Trusted host management");
+    expect(toggle.getAttribute("aria-checked")).toBe(String(trustedManagement === true));
+    expect(page.textContent).toContain("Stop active work separately");
+    const name = Array.from(page.querySelectorAll<HTMLInputElement>("input")).find(input => input.value === "Synthetic SSH")!;
+    await act(async () => setInputValue(name, "Synthetic SSH updated"));
+    await flushReact();
+    await act(async () => click(findButton(page, "Save environment")));
+    await flushReact();
+    expect(mockEnvironmentsApi.update).toHaveBeenCalledWith("env-1", expect.objectContaining({ config: expect.objectContaining({ trustedManagement: trustedManagement === true }) }), "company-1");
+  });
+
   it("does not offer delete on the add-environment page", async () => {
     root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

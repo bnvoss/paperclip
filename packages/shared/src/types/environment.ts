@@ -20,6 +20,8 @@ export interface SshEnvironmentConfig {
   privateKeySecretRef: EnvSecretRefBinding | null;
   knownHosts: string | null;
   strictHostKeyChecking: boolean;
+  /** Explicit instance-admin admission to native Codex SSH host management. */
+  trustedManagement?: boolean;
 }
 
 export type SandboxEnvironmentProvider = "fake" | (string & {});

@@ -47,6 +47,8 @@ const mockInstanceSettingsService = vi.hoisted(() => ({
   listCompanyIds: vi.fn(),
 }));
 
+const mockEnvironmentService = vi.hoisted(() => ({ getById: vi.fn() }));
+
 const mockLogActivity = vi.hoisted(() => vi.fn());
 
 const mockRoutineService = vi.hoisted(() => ({
@@ -67,6 +69,7 @@ const mockDb = vi.hoisted(() => ({
 }));
 
 function registerRouteMocks() {
+  vi.doMock("../services/environments.js", () => ({ environmentService: () => mockEnvironmentService }));
   vi.doMock("../services/access.js", () => ({
     accessService: () => mockAccessService,
   }));
@@ -192,6 +195,7 @@ function makeIssue(overrides: Record<string, unknown> = {}) {
 describe("issue workspace command authorization", () => {
   beforeEach(() => {
     vi.resetModules();
+    vi.doUnmock("../services/environments.js");
     vi.doUnmock("../services/access.js");
     vi.doUnmock("../services/activity-log.js");
     vi.doUnmock("../services/agents.js");
@@ -207,6 +211,7 @@ describe("issue workspace command authorization", () => {
     vi.doUnmock("../middleware/index.js");
     registerRouteMocks();
     vi.clearAllMocks();
+    mockEnvironmentService.getById.mockResolvedValue(null);
     mockIssueService.addComment.mockResolvedValue(null);
     mockIssueService.create.mockResolvedValue(makeIssue());
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
@@ -261,6 +266,24 @@ describe("issue workspace command authorization", () => {
           onRejected,
         ),
     }));
+  });
+
+  it("denies changed trusted-role task launch authority and permits ordinary model/task improvements", async () => {
+    const agentId = "11111111-1111-4111-8111-111111111111";
+    const existing = makeIssue({ assigneeAgentId: agentId });
+    mockIssueService.getById.mockResolvedValue(existing);
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...existing, ...patch }));
+    mockAgentService.getById.mockResolvedValue({ id: agentId, companyId: "company-1", status: "idle", adapterType: "paperclip_runner", adapterConfig: { provider: "codex", codexPermissionMode: "never" }, defaultEnvironmentId: "env-trusted" });
+    mockEnvironmentService.getById.mockResolvedValue({ id: "env-trusted", driver: "ssh", config: { trustedManagement: true } });
+    const app = await createApp({ type: "board", source: "session", userId: "board-user", companyIds: ["company-1"], isInstanceAdmin: false });
+    for (const adapterConfig of [{ provider: "opencode" }, { workspaceStrategy: { type: "git_worktree", runtimeProvisionCommand: "printf changed" } }]) {
+      const response = await request(app).patch("/api/issues/issue-1").send({ assigneeAdapterOverrides: { adapterConfig } });
+      expect(response.status, JSON.stringify(response.body)).toBe(403);
+    }
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    const ordinary = await request(app).patch("/api/issues/issue-1").send({ assigneeAdapterOverrides: { adapterConfig: { provider: "codex", codexPermissionMode: "never", model: "new", modelReasoningEffort: "max" } } });
+    expect(ordinary.status, JSON.stringify(ordinary.body)).toBe(200);
+    expect(mockIssueService.update).toHaveBeenCalledOnce();
   });
 
   it("rejects agent callers that create issue workspace runtime provision commands", async () => {

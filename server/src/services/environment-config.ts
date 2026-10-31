@@ -55,6 +55,7 @@ const sshEnvironmentConfigSchema = z.object({
     .nullable()
     .transform((value) => (value && value.length > 0 ? value : null)),
   strictHostKeyChecking: z.boolean().optional().default(true),
+  trustedManagement: z.boolean().optional().default(false),
 }).strict();
 
 const sshEnvironmentConfigProbeSchema = sshEnvironmentConfigSchema.extend({

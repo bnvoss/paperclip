@@ -59,6 +59,8 @@ export interface CodexAppServerDriverOptions {
   /** Current server constraints; does not commit task status before the turn ends. */
   completionFeedback?: (result: import("../../protocol/replay-contract.js").PrpStructuredRunResult) => Promise<string>;
   environment?: NodeJS.ProcessEnv;
+  /** Controller-owned permission mode; never inferred from environment values. */
+  permissionMode?: import("./codex-security-config.js").CodexPermissionMode;
   /** Filesystem that authoritatively admits the workspace path. */
   workingDirectoryAuthority?: CodexWorkingDirectoryAuthority;
   now?: () => Date;

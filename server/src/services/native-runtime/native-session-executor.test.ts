@@ -1,3 +1,4 @@
+import { nativeExecutionTargetFingerprint } from "./trusted-ssh-management.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import {
@@ -21,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   heartbeatRuns,
+  environments,
   heartbeatRunEvents,
   issues,
   nativeRunFinalizations,
@@ -106,6 +108,9 @@ type RunnerTransportOptions = {
   opencodePermissionMode?: "allow" | "ask" | "deny";
   acpxAgent?: "claude" | "codex";
   acpxPermissionMode?: "approve-all" | "approve-paperclip" | "approve-reads" | "deny-all";
+  trustedSshManagement?: boolean;
+  executionTargetFingerprint?: string | null;
+  externallySandboxed?: boolean;
   resumeActiveTurnId?: string | null;
   resumeProviderSession?: {
     driverSessionId: string;
@@ -287,6 +292,7 @@ import {
   getNativeSessionSteeringState,
   NativeSessionSteeringError,
   assertRemoteRunnerBuildMetadata,
+  nativeSessionConfigDigest,
   nativeSessionFailureDisposition,
   nativeFailedRunRetryStateIsSafe,
   verifyStoppedNativeSessionForContinuation,
@@ -1462,6 +1468,33 @@ describe("verified native harness backups", () => {
     ).toBe(false);
   });
 
+  it("fences trusted SSH restore by environment, transport and versioned permission identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "paperclip-harness-trusted-ssh-"));
+    const target = { kind: "remote" as const, transport: "ssh" as const, environmentId: "env-trusted",
+      trustedManagement: true, remoteCwd: "/workspace", spec: { host: "ssh.example.test", port: 22, username: "operator", remoteWorkspacePath: "/workspace", remoteCwd: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true } };
+    try {
+      const current = join(root, "failover-backups", "current");
+      for (const name of ["runner", "codex-home"]) {
+        await mkdir(join(current, name), { recursive: true });
+        await writeFile(join(current, name, "synthetic-state"), "state");
+      }
+      const manifest = buildNativeHarnessBackupManifest({ backupRoot: current, execution: backupExecution,
+        runnerExecutionTarget: target, runnerInstanceId: "runner-1", sourceProviderLeaseId: "lease-1",
+        providerSessionIdentity: { providerSessionId: "thread-1", providerBackendSessionId: "session-1", providerSessionIdentity: null } });
+      await writeFile(join(current, "manifest.json"), JSON.stringify(manifest));
+      const verify = (runnerExecutionTarget: import("@paperclipai/adapter-utils/execution-target").AdapterExecutionTarget) => verifyNativeHarnessBackup({ root, execution: backupExecution, runnerInstanceId: "runner-1", runnerExecutionTarget });
+      expect(verify(target)).not.toBeNull();
+      for (const changed of [{ ...target, trustedManagement: false }, { ...target, environmentId: "env-other" },
+        { ...target, spec: { ...target.spec, host: "other.example.test" } },
+        { kind: "remote" as const, transport: "sandbox" as const, environmentId: target.environmentId, remoteCwd: "/workspace" }, { kind: "local" as const }]) {
+        expect(verify(changed)).toBeNull();
+      }
+      const legacy = buildNativeHarnessBackupManifest({ backupRoot: current, execution: backupExecution, runnerInstanceId: "runner-1", sourceProviderLeaseId: "lease-1", providerSessionIdentity: manifest.providerSessionIdentity });
+      await writeFile(join(current, "manifest.json"), JSON.stringify(legacy));
+      expect(verify(target)).toBeNull();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("accepts a complete digest-matched backup and rejects corruption", async () => {
     const root = await mkdtemp(join(tmpdir(), "paperclip-harness-backup-"));
     try {
@@ -2276,6 +2309,13 @@ describe("remote runner build metadata", () => {
     expect(() =>
       assertRemoteRunnerBuildMetadata(current, "listen_ws"),
     ).not.toThrow();
+  });
+
+  it("requires the versioned profile capability only for requested trusted SSH management", () => {
+    expect(() => assertRemoteRunnerBuildMetadata(current, "listen_ws", false)).not.toThrow();
+    expect(() => assertRemoteRunnerBuildMetadata(current, "listen_ws", true)).toThrow("trusted_ssh_management_capability_missing");
+    expect(() => assertRemoteRunnerBuildMetadata({ ...current, codexPermissionProfiles: ["paperclip-runner-trusted-ssh-management-v0"] }, "listen_ws", true)).toThrow("capability_missing");
+    expect(() => assertRemoteRunnerBuildMetadata({ ...current, codexPermissionProfiles: ["paperclip-runner-trusted-ssh-management-v1"] }, "listen_ws", true)).not.toThrow();
   });
 
   it("fails before dispatch when a preinstalled runner uses the stale contract", () => {
@@ -4781,6 +4821,7 @@ function leaseDb(
   updates: Array<{ table: unknown; values: Record<string, unknown> }> = [],
   runnerProfileJson: Record<string, unknown> = {},
   runStatus = "running",
+  savedEnvironment?: Record<string, unknown>,
 ): Db {
   const coordinator: LeaseCoordinator = {
     runId: boundExecution.binding.runId,
@@ -4813,7 +4854,7 @@ function leaseDb(
   const select = () => ({
     from: (table: unknown) => {
       const rows =
-        table === nativeRunFinalizations
+        table === environments ? (savedEnvironment ? [savedEnvironment] : []) : table === nativeRunFinalizations
           ? [coordinator]
           : table === heartbeatRuns
             ? [
@@ -7082,6 +7123,7 @@ describe("native warm session supervision", () => {
                 lifecyclePolicy: first.session.lifecyclePolicy,
                 executionMode: "default",
                 runtimeContextDigest: null,
+                ...(nativeExecutionTargetFingerprint(remoteTarget) !== null ? { executionTargetFingerprint: nativeExecutionTargetFingerprint(remoteTarget) } : {}),
                 nativeToolContractFingerprint:
                   checkpointContract === "missing"
                     ? undefined
@@ -8824,7 +8866,7 @@ describe("runnerd provider runtime wiring", () => {
     };
     expect(
       localTransportOptions.environment.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX,
-    ).toBeUndefined();
+    ).toBe("0");
   });
 
   it("atomically migrates legacy unscoped state only for its exact durable run identity", async () => {
@@ -11058,7 +11100,7 @@ describe("runnerd provider runtime wiring", () => {
     );
   });
 
-  it("uses the remote workspace for both the runner backend and native session", async () => {
+  it.each([false, true])("uses the remote workspace and controller-resolved SSH permissions (trusted=%s)", async trustedManagement => {
     const remoteCwd = "/home/daytona/paperclip-workspace";
     const remoteExecution = {
       ...execution,
@@ -11106,13 +11148,15 @@ describe("runnerd provider runtime wiring", () => {
     });
 
     await executePaperclipNativeSession({
-      db: leaseDb(remoteExecution),
+      db: leaseDb(remoteExecution, {}, {}, [], {}, "running", { driver: "ssh", status: "active", config: { host: "runner.internal", port: 22, username: "runner", remoteWorkspacePath: remoteCwd, strictHostKeyChecking: true, trustedManagement } }),
       execution: remoteExecution,
       runnerInstanceId: "runner",
       useRunnerd: true,
       runnerExecutionTarget: {
         kind: "remote",
         transport: "ssh",
+        environmentId: "env-ssh-authority",
+        trustedManagement,
         remoteCwd,
         spec: {
           host: "runner.internal",
@@ -11159,7 +11203,10 @@ describe("runnerd provider runtime wiring", () => {
     };
     expect(
       sshTransportOptions.environment.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX,
-    ).toBeUndefined();
+    ).toBe("0");
+    expect(state.createTransport.mock.calls[0]![0].trustedSshManagement).toBe(trustedManagement);
+    expect(state.createTransport.mock.calls[0]![0].externallySandboxed).toBe(false);
+    expect(state.createTransport.mock.calls[0]![0].executionTargetFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/);
     expect(state.createTransport.mock.calls[0]![0].runnerBinary).not.toBe(
       `${remoteCwd}/.paperclip-runtime/paperclip-runner/bin/paperclip-runnerd`,
     );
@@ -11686,4 +11733,20 @@ it.each([
       new NativeProviderTerminalFailure(code, false),
     ),
   ).toBe("native_event_replay_conflict");
+});
+
+
+describe("native permission checkpoint identity", () => {
+  it("rotates the warm/checkpoint digest for trusted permission, transport and environment changes", () => {
+    const target = { kind: "remote" as const, transport: "ssh" as const, environmentId: "env-trusted", trustedManagement: true,
+      remoteCwd: "/workspace", spec: { host: "ssh.example.test", port: 22, username: "operator", remoteWorkspacePath: "/workspace", remoteCwd: "/workspace", privateKey: null, knownHosts: null, strictHostKeyChecking: true } };
+    const digest = nativeSessionConfigDigest(execution, target);
+    expect(nativeSessionConfigDigest(execution, { ...target, leaseId: "new-lease" })).toBe(digest);
+    for (const changed of [{ ...target, trustedManagement: false }, { ...target, environmentId: "other" },
+      { ...target, spec: { ...target.spec, username: "other" } },
+      { kind: "remote" as const, transport: "sandbox" as const, remoteCwd: "/workspace" }, { kind: "local" as const }]) {
+      expect(nativeSessionConfigDigest(execution, changed)).not.toBe(digest);
+    }
+    expect(nativeSessionConfigDigest(execution)).toBe(nativeSessionConfigDigest(execution, { kind: "local" }));
+  });
 });

@@ -1,3 +1,8 @@
+import {
+  assertTrustedSshManagementAuthority,
+  nativeExecutionTargetFingerprint,
+  CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE,
+} from "./trusted-ssh-management.js";
 import { resolveAcpxQualification } from "./acpx-qualification.js";
 import { readLocalAiCredentialFile } from "../local-ai-credential-file.js";
 import { prepareGrokRunnerCredentials } from "./grok-runner-credentials.js";
@@ -1857,6 +1862,7 @@ function runnerdAuthorityLifecycle(
 }
 
 function runnerdAuthorityLifecycleWithVerifiedBackup(input: {
+  runnerExecutionTarget?: AdapterExecutionTarget | null;
   root: string;
   identity: RunnerdDurableIdentity;
   execution: NativeExecutionInput;
@@ -1866,6 +1872,7 @@ function runnerdAuthorityLifecycleWithVerifiedBackup(input: {
   if (direct !== "absent") return direct;
   if (!input.allowVerifiedBackup) return "indeterminate";
   const backup = verifyNativeHarnessBackup({
+    runnerExecutionTarget: input.runnerExecutionTarget,
     root: input.root,
     execution: input.execution,
     runnerInstanceId: input.identity.runnerInstanceId,
@@ -3855,6 +3862,7 @@ async function assertCleanupActivationCommitted(
  * run. Never migrate/archive state, release an owner, or contact a provider.
  * Normal executor admission independently verifies the state again. */
 export function nativeFailedRunRetryStateIsSafe(input: {
+  runnerExecutionTarget?: AdapterExecutionTarget | null;
   execution: unknown;
   companyId: string;
   issueId: string;
@@ -3949,6 +3957,7 @@ export function nativeFailedRunRetryStateIsSafe(input: {
     const direct = runnerdAuthorityLifecycle(root, identity);
     if (direct === "absent" && input.allowVerifiedBackup) {
       const backup = verifyNativeHarnessBackup({
+        runnerExecutionTarget: input.runnerExecutionTarget,
         root,
         execution,
         runnerInstanceId: input.runnerInstanceId,
@@ -4113,6 +4122,7 @@ export function nativePreProviderRetryAfterCleanupStateIsSafe(input: {
 }
 
 async function verifyPriorRunnerdStateForSessionScope(input: {
+  runnerExecutionTarget?: AdapterExecutionTarget | null;
   db: Db;
   root: string;
   identity: RunnerdDurableIdentity;
@@ -4703,6 +4713,7 @@ async function migrateRunnerdStateRootForExecution(input: {
           identity,
           execution: input.execution,
           allowVerifiedBackup: input.allowVerifiedBackup,
+          runnerExecutionTarget: input.runnerExecutionTarget,
         }) === "indeterminate"
       ) {
         if (input.restartRecovery?.kind !== "reattach_existing_runner") {
@@ -4718,6 +4729,7 @@ async function migrateRunnerdStateRootForExecution(input: {
         execution: input.execution,
         allowVerifiedBackup: input.allowVerifiedBackup,
         allowRetainedWarmRunner: input.allowRetainedWarmRunner,
+        runnerExecutionTarget: input.runnerExecutionTarget,
       });
       if (
         verification !== "verified" &&
@@ -4760,6 +4772,7 @@ async function migrateRunnerdStateRootForExecution(input: {
         execution: input.execution,
         allowVerifiedBackup: input.allowVerifiedBackup,
         allowRetainedWarmRunner: input.allowRetainedWarmRunner,
+        runnerExecutionTarget: input.runnerExecutionTarget,
       });
       if (
         verification !== "verified" &&
@@ -5235,9 +5248,9 @@ function loadRunnerdDurableBinding(
   };
 }
 
-function nativeSessionConfigDigest(
+export function nativeSessionConfigDigest(
   execution: NativeExecutionInput,
-  executionTargetKind: "local" | "remote" = "local",
+  executionTarget?: AdapterExecutionTarget | null,
   legacyProjectlessRunId?: string,
 ): string {
   const executionLocation = {
@@ -5272,7 +5285,8 @@ function nativeSessionConfigDigest(
         // changes so an older thread is rotated instead of falsely resuming
         // without newly required tools.
         nativeToolContractFingerprint:
-          nativeToolContractFingerprintForTarget(executionTargetKind),
+          nativeToolContractFingerprintForTarget(executionTarget?.kind ?? "local"),
+        ...(nativeExecutionTargetFingerprint(executionTarget) !== null ? { executionTargetFingerprint: nativeExecutionTargetFingerprint(executionTarget) } : {}),
       }),
     )
     .digest("hex")}`;
@@ -5296,13 +5310,14 @@ function hasIdleWarmNativeSessionOwner(input: {
     entry.configDigest ===
       nativeSessionConfigDigest(
         input.execution,
-        input.runnerExecutionTarget?.kind ?? "local",
+        input.runnerExecutionTarget,
       )
   );
 }
 
 function nativeHarnessEnvironmentFingerprint(
   execution: NativeExecutionInput,
+  executionTarget?: AdapterExecutionTarget | null,
 ): string {
   return `sha256:${createHash("sha256")
     .update(
@@ -5319,6 +5334,7 @@ function nativeHarnessEnvironmentFingerprint(
         },
         provider: execution.provider,
         driverKind: execution.session.driverKind,
+        ...(nativeExecutionTargetFingerprint(executionTarget) !== null ? { executionTargetFingerprint: nativeExecutionTargetFingerprint(executionTarget) } : {}),
       }),
     )
     .digest("hex")}`;
@@ -5696,6 +5712,7 @@ export function shouldRestoreNativeHarnessBackupIntoSandbox(input: {
 }
 
 function compatibleNativeHarnessBackupManifests(input: {
+  runnerExecutionTarget?: AdapterExecutionTarget | null;
   root: string;
   execution: NativeExecutionInput;
   runnerInstanceId: string;
@@ -5726,7 +5743,7 @@ function compatibleNativeHarnessBackupManifests(input: {
       manifest.providerKind !== profile.providerKind ||
       manifest.driverKind !== profile.driverKind ||
       manifest.environmentFingerprint !==
-        nativeHarnessEnvironmentFingerprint(input.execution) ||
+        nativeHarnessEnvironmentFingerprint(input.execution, input.runnerExecutionTarget) ||
       manifest.runnerContractVersion !== RUNNERD_BINARY_CONTRACT_VERSION ||
       !providerSessionIdentityIsPresent(manifest.providerSessionIdentity) ||
       !Array.isArray(manifest.directories)
@@ -5742,6 +5759,7 @@ function compatibleNativeHarnessBackupManifests(input: {
 }
 
 export function buildNativeHarnessBackupManifest(input: {
+  runnerExecutionTarget?: AdapterExecutionTarget | null;
   backupRoot: string;
   execution: NativeExecutionInput;
   runnerInstanceId: string;
@@ -5767,7 +5785,7 @@ export function buildNativeHarnessBackupManifest(input: {
     providerSessionIdentity: input.providerSessionIdentity,
     sourceProviderLeaseId: input.sourceProviderLeaseId,
     environmentFingerprint: nativeHarnessEnvironmentFingerprint(
-      input.execution,
+      input.execution, input.runnerExecutionTarget,
     ),
     runnerContractVersion: RUNNERD_BINARY_CONTRACT_VERSION,
     directories,
@@ -5776,6 +5794,7 @@ export function buildNativeHarnessBackupManifest(input: {
 }
 
 export function verifyNativeHarnessBackup(input: {
+  runnerExecutionTarget?: AdapterExecutionTarget | null;
   root: string;
   execution: NativeExecutionInput;
   runnerInstanceId: string;
@@ -5879,7 +5898,7 @@ function persistWarmNativeCheckpoint(
 function loadWarmNativeCheckpoint(
   execution: NativeExecutionInput,
   configDigest: string,
-  executionTargetKind: "local" | "remote" = "local",
+  executionTarget?: AdapterExecutionTarget | null,
 ): PersistedNativeSession | null {
   const scopedPath = nativeSessionCheckpointPath(execution);
   const path = [
@@ -5921,7 +5940,7 @@ function loadWarmNativeCheckpoint(
     typeof persistedIdentity.runId === "string"
       ? nativeSessionConfigDigest(
           execution,
-          executionTargetKind,
+          executionTarget,
           persistedIdentity.runId,
         )
       : null;
@@ -7317,6 +7336,8 @@ export async function executePaperclipNativeSession(input: {
   );
   const ownerToken = Symbol("native execution owner");
   try {
+    await assertTrustedSshManagementAuthority({ db: input.db, target: input.runnerExecutionTarget,
+      nativeRunner: input.useRunnerd === true, provider: input.execution.provider.kind });
     // Reserve across session identities before retiring or staging anything.
     if (executingNativeOwnerScopes.has(ownerScope)) {
       throw new Error("native_session_supervisor_busy");
@@ -8115,7 +8136,7 @@ async function executePaperclipNativeSessionWithinScope(
     lifecyclePolicy.mode === "warm"
       ? nativeSessionConfigDigest(
           input.execution,
-          input.runnerExecutionTarget?.kind ?? "local",
+          input.runnerExecutionTarget,
         )
       : null;
   const warmSessionOwnerToken = Symbol(
@@ -8165,7 +8186,7 @@ async function executePaperclipNativeSessionWithinScope(
         persistedWarmSession = loadWarmNativeCheckpoint(
           input.execution,
           warmConfigDigest,
-          input.runnerExecutionTarget?.kind ?? "local",
+          input.runnerExecutionTarget,
         );
       } else {
         if (entry.busy) throw new Error("native_session_supervisor_busy");
@@ -8182,7 +8203,7 @@ async function executePaperclipNativeSessionWithinScope(
       persistedWarmSession = loadWarmNativeCheckpoint(
         input.execution,
         warmConfigDigest,
-        input.runnerExecutionTarget?.kind ?? "local",
+        input.runnerExecutionTarget,
       );
     }
   }
@@ -9657,6 +9678,7 @@ export function readRemoteProviderPackManifest(
 export function assertRemoteRunnerBuildMetadata(
   value: unknown,
   requiredMode: "dial_wss" | "listen_ws",
+  trustedSshManagement = false,
 ): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("runner_remote_artifact_metadata_invalid");
@@ -9680,6 +9702,10 @@ export function assertRemoteRunnerBuildMetadata(
     if (!sessionCapabilities.includes(capability)) {
       throw new Error(`runner_remote_session_capability_missing:${capability}`);
     }
+  }
+  if (trustedSshManagement && (!Array.isArray(metadata.codexPermissionProfiles)
+    || !metadata.codexPermissionProfiles.includes(CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE))) {
+    throw new Error("runner_remote_trusted_ssh_management_capability_missing");
   }
   const modes = Array.isArray(metadata.prpTransportModes)
     ? metadata.prpTransportModes
@@ -10677,6 +10703,8 @@ export async function createRunnerdBackend(input: {
     },
   ) => Promise<unknown>;
 }): Promise<NativeSessionBackend & { bindManagedSession(session: NativeSession): NativeSession }> {
+  await assertTrustedSshManagementAuthority({ db: input.db, target: input.runnerExecutionTarget,
+    nativeRunner: true, provider: input.execution.provider.kind });
   const sessionScopeId = nativeSessionScopeKey(input.execution);
   const scopeOwner = executingRunnerdSessionScopes.get(sessionScopeId);
   if (scopeOwner && scopeOwner !== input.execution.binding.runId) {
@@ -10990,7 +11018,7 @@ async function createRunnerdBackendWithinSessionClaim(
         cause: error,
       });
     }
-    assertRemoteRunnerBuildMetadata(metadata, requiredMode);
+    assertRemoteRunnerBuildMetadata(metadata, requiredMode, remoteTarget.transport === "ssh" && remoteTarget.trustedManagement === true);
   };
 
   const reportedCodexVersions = new Set<string>();
@@ -11724,6 +11752,7 @@ async function createRunnerdBackendWithinSessionClaim(
       throw new Error("runner_harness_backup_unavailable");
     }
     const backup = verifyNativeHarnessBackup({
+      runnerExecutionTarget: input.runnerExecutionTarget,
       root,
       execution: input.execution,
       runnerInstanceId: input.runnerInstanceId,
@@ -12171,6 +12200,7 @@ async function createRunnerdBackendWithinSessionClaim(
                   }
                 }
                 const manifest = buildNativeHarnessBackupManifest({
+                  runnerExecutionTarget: input.runnerExecutionTarget,
                   backupRoot: pendingRoot,
                   execution: input.execution,
                   runnerInstanceId: input.runnerInstanceId,
@@ -12328,7 +12358,11 @@ async function createRunnerdBackendWithinSessionClaim(
           stateDirectory: remoteStateDirectory,
           diagnosticsDirectory: posix.join(remoteSessionRoot!, "diagnostics"),
           runnerInstanceId: input.runnerInstanceId,
-          ensureArtifact: ensureRemoteRunner,
+          ensureArtifact: async () => {
+            await ensureRemoteRunner();
+            await assertTrustedSshManagementAuthority({ db: input.db, target: input.runnerExecutionTarget,
+              nativeRunner: true, provider: input.execution.provider.kind });
+          },
           onSpawn: input.onSpawn,
           onLog: input.onLog,
           trace: input.trace,
@@ -12365,7 +12399,9 @@ async function createRunnerdBackendWithinSessionClaim(
   // This authority bit is derived only from the selected execution target.
   // Never let an agent, environment binding, or host variable disable the
   // Codex sandbox for a local runner by supplying the same key.
-  delete effectiveRunnerEnvironmentBase.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX;
+  // Explicit zero also overrides an SSH account profile for older compatible
+  // runners whose provider still reads this legacy ambient variable.
+  effectiveRunnerEnvironmentBase.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX = "0";
   const effectiveRunnerEnvironment: NodeJS.ProcessEnv = remoteRuntimeRoot
     ? {
         ...effectiveRunnerEnvironmentBase,
@@ -12460,6 +12496,8 @@ async function createRunnerdBackendWithinSessionClaim(
     runnerInstanceId:
       retainedTransition?.runnerInstanceId ?? input.runnerInstanceId,
     environment: effectiveRunnerEnvironment,
+    permissionMode: remoteTarget?.transport === "ssh" && remoteTarget.trustedManagement === true
+      ? "trusted-ssh-management" : remoteTarget?.transport === "sandbox" ? "external-sandbox" : "workspace",
     workingDirectoryAuthority: remoteTarget
       ? "remote_runner"
       : "local_filesystem",
@@ -12621,6 +12659,8 @@ async function createRunnerdBackendWithinSessionClaim(
         runnerFilesystemRoot: remoteRunnerFilesystemRoot ?? undefined,
         resumeWorkingDirectory: runnerExecution.workspace.cwd,
         externallySandboxed: remoteTarget?.transport === "sandbox",
+        trustedSshManagement: remoteTarget?.transport === "ssh" && remoteTarget.trustedManagement === true,
+        executionTargetFingerprint: nativeExecutionTargetFingerprint(target),
         opencodeRuntimeDirectory: remoteRunnerFilesystemRoot
           ? posix.join(remoteRunnerFilesystemRoot, "opencode")
           : undefined,

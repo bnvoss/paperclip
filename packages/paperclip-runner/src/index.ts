@@ -78,3 +78,5 @@ export * from "./generated/capability-contract.js";
 export * from "./semantic-tools/index.js";
 export * as acceptedCapabilitySemanticTools from "./semantic-tools/index.js";
 export * from "./compatibility.js";
+
+export { CODEX_TRUSTED_SSH_MANAGEMENT_PERMISSION_PROFILE } from "./drivers/codex/codex-security-config.js";
