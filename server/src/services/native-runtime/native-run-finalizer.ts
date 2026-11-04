@@ -1264,13 +1264,9 @@ export async function finalizeNativeRun(input: {
         issueId: authoritativeIssue.id,
         runId: run.id,
       }),
-      (terminalState === "failed" || (assessment.reportedDisposition === "yielded" &&
-      assessment.continuation?.kind === "response_wake" &&
-      assessment.hasBlockingRemainingWork))
-        ? issueTreeControlService(input.db).getActivePauseHoldGate(
-            run.companyId, authoritativeIssue.id,
-          )
-        : Promise.resolve(null),
+      issueTreeControlService(input.db).getActivePauseHoldGate(
+        run.companyId, authoritativeIssue.id,
+      ),
     ]);
     const reviewContext = readNativeReviewAssignmentContext(run.contextSnapshot);
     const nativeReview = reviewContext ? await getNativeReviewAssignment(input.db, {

@@ -1,7 +1,8 @@
 import type { NativeEvidenceAssessment } from "./evidence-classifier.js";
+import { nativeReviewReportProblem } from "./native-review-readiness.js";
 import { NATIVE_MODEL_REJECTION_MESSAGE, NATIVE_PROVIDER_CAPACITY_MAX_RETRIES, NATIVE_PROVIDER_OVERLOADED_CODE, NATIVE_PROVIDER_OVERLOADED_MESSAGE } from "./native-provider-failure.js";
 
-export const NATIVE_STATUS_ARBITER_POLICY_VERSION = "phase6-v9";
+export const NATIVE_STATUS_ARBITER_POLICY_VERSION = "phase6-lifecycle-v1";
 
 export type NativeAuthoritativeIssueStatus =
   | "backlog"
@@ -319,9 +320,17 @@ export function arbitrateNativeStatus(input: {
     input.assessment.reportedDisposition === "yielded" &&
     input.assessment.continuation?.kind === "response_wake" &&
     input.assessment.hasBlockingRemainingWork;
+  if (input.hasActivePauseHold && !input.isConversation &&
+      (input.assessment.reportedDisposition === "done" || input.assessment.attentionRequests.length > 0)) {
+    return {
+      policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+      statusAction: "preserve", toStatus: input.priorIssueStatus,
+      reasonCode: "delivery_pause_preserved", unblockDescriptor: null,
+      effects: [{ kind: "release_checkout" }],
+    };
+  }
   if (
-    input.hasUnresolvedIssueBlockers === true &&
-    (["done", "blocked"].includes(input.assessment.reportedDisposition) || unfinishedResponseWait)
+    input.hasUnresolvedIssueBlockers === true
   ) {
     const owner = input.assessment.blocker?.boardOwned
       ? ("board" as const)
@@ -378,6 +387,17 @@ export function arbitrateNativeStatus(input: {
   // A completion claim is not a request for human approval. Only a concrete,
   // explicitly reported attention request may create a review interaction.
   if (input.assessment.attentionRequests.length > 0) {
+    const problem = nativeReviewReportProblem(input.assessment);
+    if (problem) return {
+      policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+      statusAction: "in_progress", toStatus: "in_progress", reasonCode: problem.code, unblockDescriptor: null,
+      effects: problem.code === "native_review_outcome_unknown"
+        ? [{ kind: "release_checkout" }, { kind: "record_recovery", cause: problem.code, nextAction: problem.message, agentId: input.agentId }]
+        : input.allowIncompleteContinuation === false
+        ? [{ kind: "record_finalization_error", cause: problem.code, nextAction: problem.message, agentId: input.agentId }]
+        : [{ kind: "enqueue_continuation", continuationKind: "same_agent", summary: problem.message,
+            idempotencyKey: "native-completion-incomplete", agentId: input.agentId }],
+    };
     return {
       policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
       statusAction: "in_review",

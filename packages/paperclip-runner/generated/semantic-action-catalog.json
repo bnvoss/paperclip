@@ -744,11 +744,27 @@
       "planning",
       "skill_test"
     ],
-    "description": "Create a typed, durable interaction on the active task.",
+    "description": "Create a typed, durable input or proposal decision on the active task. A response resumes its worker; it does not complete unfinished work. Select human_only only for an explicitly reserved human decision. Keep native agent review and external receiving identities distinct from the human responsible user.",
     "effect": "write",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
+        "addresseeAgentId": {
+          "description": "Exact native agent recipient for a coordination request; do not create a human relay.",
+          "maxLength": 240,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "addresseeUserId": {
+          "description": "Exact authorized human recipient, when a specific person is required.",
+          "maxLength": 240,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "continuationPolicy": {
           "enum": [
             "none",
@@ -780,6 +796,13 @@
           "maxLength": 10000,
           "minLength": 1,
           "type": "string"
+        },
+        "resolverPolicy": {
+          "enum": [
+            "anyone",
+            "not_creator",
+            "human_only"
+          ]
         },
         "targetRevisionId": {
           "description": "Optional bound document revision.",

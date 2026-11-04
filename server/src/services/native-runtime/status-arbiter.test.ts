@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { NativeEvidenceAssessment } from "./evidence-classifier.js";
-import { arbitrateNativeStatus } from "./status-arbiter.js";
+import { arbitrateNativeStatus, NATIVE_STATUS_ARBITER_POLICY_VERSION } from "./status-arbiter.js";
 
 function assessment(
   overrides: Partial<NativeEvidenceAssessment> = {},
@@ -15,7 +15,7 @@ function assessment(
     reportedDisposition: "done",
     summary: "Complete",
     contractRevisionMatches: true,
-    criterionAssessments: [],
+    criterionAssessments: [{ criterionId: "objective", claimStatus: "satisfied", outcome: "accepted", evidenceRefs: [], reasonCode: "verified" }],
     verificationAssessments: [],
     verificationCaveats: [],
     acceptedEvidenceRefs: ["event:2"],
@@ -44,6 +44,45 @@ function arbitrate(
 }
 
 describe("native status authority", () => {
+  const requestedReview = (overrides: Partial<NativeEvidenceAssessment> = {}) => assessment({
+    reportedDisposition: "needs_review",
+    criterionAssessments: [{ criterionId: "objective", claimStatus: "satisfied", outcome: "unverifiable", evidenceRefs: [], reasonCode: "claim" }],
+    attentionRequests: [{ kind: "review", ownerClass: "agent", targetAgentId: "review-agent", summary: "Review the finished output", sourceIndex: 0, sourceKind: "review", legacy: false }],
+    ...overrides,
+  });
+
+  it.each(["needs_review", "yielded"] as const)("keeps dependent %s work blocked without creating completion review", (reportedDisposition) => {
+    const decision = arbitrate({ assessment: requestedReview({ reportedDisposition }), hasUnresolvedIssueBlockers: true });
+    expect(decision).toMatchObject({ toStatus: "blocked", reasonCode: "durable_dependency_blocker_bound", effects: [] });
+  });
+
+  it("does not admit unfinished or unknown work to completion review", () => {
+    for (const unfinished of [
+      { hasBlockingRemainingWork: true }, { objectiveClaimSatisfied: false },
+    ]) {
+      const decision = arbitrate({ assessment: requestedReview(unfinished) });
+      expect(decision.toStatus).toBe("in_progress");
+      expect(decision.effects.some(effect => effect.kind === "bind_reviewer")).toBe(false);
+      expect(decision.effects).toContainEqual(expect.objectContaining({ kind: "enqueue_continuation", agentId: "agent", idempotencyKey: "native-completion-incomplete" }));
+    }
+    const unknown = arbitrate({ assessment: requestedReview({ criterionAssessments: [{ criterionId: "objective", claimStatus: "unknown", outcome: "unverifiable", evidenceRefs: [], reasonCode: "unknown_effect" }] }) });
+    expect(unknown.effects).toContainEqual(expect.objectContaining({ kind: "record_recovery", agentId: "agent" }));
+    expect(unknown.effects.some(effect => ["enqueue_continuation", "schedule_retry", "bind_reviewer"].includes(effect.kind))).toBe(false);
+  });
+
+  it("preserves a pause instead of creating review or waking another actor", () => {
+    expect(arbitrate({ assessment: requestedReview(), priorIssueStatus: "blocked", hasActivePauseHold: true }))
+      .toMatchObject({ statusAction: "preserve", toStatus: "blocked", effects: [{ kind: "release_checkout" }] });
+  });
+
+  it("preserves a concrete human review of a complete bounded delivery", () => {
+    const human = requestedReview({ attentionRequests: [{ kind: "review", ownerClass: "human", targetAgentId: null, summary: "Accept delivery", sourceIndex: 0, sourceKind: "review", legacy: false }] });
+    const ordinary = arbitrate({ assessment: human, completionClaimPolicyAccepted: true });
+    expect(ordinary.effects.some(effect => effect.kind === "bind_reviewer")).toBe(true);
+    expect(arbitrate({ assessment: human, completionClaimPolicyAccepted: false }).effects)
+      .toContainEqual(expect.objectContaining({ kind: "bind_reviewer" }));
+  });
+
   it("schedules a capacity retry while preserving partial work and review authority", () => {
     for (const nativeReviewOutcome of [undefined, "pending"] as const) {
       const decision = arbitrate({ terminalState: "failed", providerOverloaded: true, nativeReviewOutcome });
@@ -491,8 +530,8 @@ describe("native status authority", () => {
       }),
     ).toEqual(
       expect.objectContaining({
-        toStatus: "in_review",
-        reasonCode: "actionable_attention_pending",
+        toStatus: "in_progress",
+        reasonCode: "native_attention_requires_native_workflow",
       }),
     );
   });
@@ -547,7 +586,7 @@ describe("native status authority", () => {
       expect.objectContaining({
         statusAction: "blocked",
         toStatus: "blocked",
-        policyVersion: "phase6-v9",
+        policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
         reasonCode: "current_track_blocker_waiting",
         unblockDescriptor: {
           owner: "board",
@@ -676,12 +715,12 @@ describe("native status authority", () => {
     );
   });
   it("routes each explicit request to its own reviewer", () => {
-    const decision = arbitrate({ assessment: assessment({ attentionRequests: [
-      { kind: "approval", summary: "Approve release", ownerClass: "human", targetAgentId: null, sourceIndex: 0, sourceKind: "approval", legacy: false },
+    const decision = arbitrate({ assessment: assessment({ reportedDisposition: "needs_review", attentionRequests: [
+      { kind: "review", summary: "Review release", ownerClass: "human", targetAgentId: null, sourceIndex: 0, sourceKind: "review", legacy: false },
       { kind: "review", summary: "Review code", ownerClass: "agent", targetAgentId: "review-agent", sourceIndex: 1, sourceKind: "review", legacy: false },
     ] }), reviewOwnerUserId: "release-owner" });
     expect(decision.effects).toEqual([
-      expect.objectContaining({ kind: "bind_reviewer", requestKey: "attention-0", prompt: "Approve release", ownerUserId: "release-owner", ownerAgentId: null }),
+      expect.objectContaining({ kind: "bind_reviewer", requestKey: "attention-0", prompt: "Review release", ownerUserId: "release-owner", ownerAgentId: null }),
       expect.objectContaining({ kind: "bind_reviewer", requestKey: "attention-1", prompt: "Review code", ownerUserId: null, ownerAgentId: "review-agent" }),
     ]);
   });

@@ -137,7 +137,9 @@ conditions before model disposition:
 | Run failed | Preserve | Schedule recovery |
 | Approval, interaction, or execution stage is pending | `in_review` | Materialize/bind the governance gate and notify its owner |
 | Completion satisfies its authority policy | `done` | Release checkout |
-| Runner reports a concrete attention request with a reviewer and decision | `in_review` | Bind the requested reviewer |
+| Runner submits a complete bounded delivery with a concrete reviewer and decision | `in_review` | Bind the requested reviewer |
+| Completion review still has unfinished criteria or blocking remaining work | Keep the worker | Return corrective feedback through bounded incomplete-work recovery |
+| Completion review has an unknown criterion outcome | Keep the worker | Record owned recovery without replaying actions or automatically retrying the provider |
 | Runner reports `needs_review` without a decision, or an incomplete completion claim | Keep work with the agent | No automatic human approval; at most one corrective continuation, then a visible recovery action |
 | Runner reports a task-wide blocker | `blocked` | Persist blocker owner and unblock action |
 | Runner reports a current-track blocker | `in_progress` | Enqueue another productive track |
@@ -315,6 +317,54 @@ A new review interaction requires an explicit attention request naming the
 reviewer's responsibility and the decision. The card displays that request.
 Waiting for CI remains agent work, not a human completion approval.
 
+Completion review can close the issue. Submit only a genuinely complete bounded
+delivery through that path. A proposal or decision needed before more work is
+finished uses the existing `request_human_input` interaction and continuation.
+Its acceptance returns to the worker rather than completing the unfinished issue.
+For a completed delivery within a larger outcome, use the existing child-task
+review and keep the parent owned and unfinished. The parent's other dependencies
+remain effective when that child is accepted. There is no separate stage-review
+workflow.
+
+An ordinary follow-up contract keeps `task_outcome` alongside the current comment
+or input criteria. Answering a status or evidence challenge does not replace the
+broader outcome. Later explicit scope changes still take precedence. Do not add
+a review, child task, model job, or acceptance dependency merely to answer such a
+challenge. Reuse an existing recorded wait when real work remains held.
+
+Choose the receiver from the accepted task and current actor records. A native
+agent reviewer requires `ownerClass: agent` and its exact `targetAgentId`. A role
+title, an agent in another runtime, and the human responsible user are distinct
+identities. Do not substitute one for another. An external receiving owner uses
+the existing authorized handoff and records its disposition in the owning source.
+A human completion card is not a substitute for that handoff.
+
+`request_human_input` exposes the existing resolver policy and optional named
+addressee. Use `human_only` for an explicitly reserved human decision. The same
+company, audience, source-run, containment, and downstream action checks apply.
+Coordination input retains its open default. Calling a tool with board credentials
+does not establish that a human exercised judgment.
+
+`write_document` and `read_document` return an `evidenceRef` for the exact saved
+document and revision. Use that returned reference. The classifier checks its
+company and issue binding and reports missing or superseded revisions. A saved
+document establishes persistence, not independent acceptance of its content.
+
+| Lifecycle step | Accountable owner and authority | Visible result |
+| --- | --- | --- |
+| Intake and assignment | The assignee, under ordinary assignment and checkout rules | One worker owns the outcome and remaining work. |
+| Delegated result and receiving | The child worker delivers; the named reviewer or authorized external receiver decides | A complete child can be reviewed while its manager's parent remains blocked. Parent context includes the verdict. |
+| Review admission | The server checks the saved report, exact receiver, invokability, ownership, dependencies, and pause | The scoped reviewer receives execution authority; the worker retains the issue. |
+| Completion feedback | The server reports current constraints and the saved recipient | Agent review stays with that agent; the user is not asked to relay or accept it. Real human decisions remain visible. |
+| Hold and recovery | The existing hold or recovery owner retains authority | Unknown outcomes stay owned. Review cannot release a hold, replay an action, or hide approval. |
+| Resumption and closure | The worker resumes from input or returned changes; a valid verdict closes only its bound issue | Admission and acceptance recheck current state. Existing finalization and continuation idempotency remains effective. |
+
+Correct stale explicit cards through the existing authorized withdrawal path,
+with current policy and ownership checks. Withdrawal preserves history; it is
+neither acceptance nor rejection of the work. Automatic fallback-card cleanup
+does not acquire authority over explicit requests. An unavailable mutation is
+not permission to switch identities or use an alternate transport.
+
 The native runner returns current approval/dependency constraints to the agent
 when it calls `paperclip_finish`. An empty `needs_review` report without an
 existing gate is rejected with instructions to correct it. The final reply must
@@ -363,6 +413,12 @@ and current task version again before it accepts a decision. It also checks that
 the acting run is running, holds the execution lock, and names this exact card
 and decision. Another run for the same agent cannot resolve the card. An old or
 reassigned review does not grant access to newer work.
+
+Admission and acceptance also verify the saved delivery and its receiver against
+the applied source decision. A newly added dependency, pause, formal approval,
+configured execution stage, newer worker, or superseded document prevents the
+old review from completing the task. Acceptance runs under the existing issue
+verdict lock and applies these checks to human decisions too.
 
 The final required acceptance completes the child through the existing review
 resolution path and makes its blocked dependents eligible to run. Rejection

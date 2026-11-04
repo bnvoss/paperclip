@@ -1799,7 +1799,14 @@ subject to explicit workflow constraints. Missing independent evidence or a
 `needs_review` label alone must not create a human approval. Require a concrete
 reviewer decision for a new review request. Keep unfinished work with the agent,
 with bounded continuation and visible recovery. Preserve explicit approvals,
-current task ownership, cancellation, dependencies, and newer task state. See
+current task ownership, cancellation, dependencies, and newer task state.
+Review only a complete bounded delivery through the completion-review path.
+Use existing child-task review for that delivery within unfinished parent work,
+and existing input/approval interactions for proposal or reserved decisions.
+Admission and acceptance recheck the saved report, intended receiver, and current
+holds and dependencies. Unknown outcomes retain owned recovery without replay.
+Ordinary follow-up contracts retain the broader task outcome alongside the
+current request; a scoped reply alone cannot close unfinished work. See
 `doc/architecture/native-status-arbitration.md` for finish feedback and the
 provenance-checked cleanup of historical automatic completion reviews.
 

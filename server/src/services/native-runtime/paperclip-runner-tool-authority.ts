@@ -1,4 +1,5 @@
 import { setIssueTitle } from "../issue-title.js";
+import { nativeDocumentEvidenceRef } from "./native-document-evidence.js";
 import { externalObjectService } from "../external-objects.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
@@ -528,7 +529,7 @@ export class PaperclipRunnerToolAuthority {
       case "read_document": {
         const document = await documentService(this.db).getIssueDocumentByKey(this.binding.issueId, requiredString(input.key));
         if (!document) throw new Error("paperclip_runner_document_not_found");
-        return { document };
+        return { document, evidenceRef: nativeDocumentEvidenceRef(document) };
       }
       case "list_document_revisions":
         return { revisions: await documentService(this.db).listIssueDocumentRevisions(this.binding.issueId, requiredString(input.key)) };
@@ -937,6 +938,7 @@ export class PaperclipRunnerToolAuthority {
         disposition: "applied",
         created: write.created,
         document: write.document,
+        evidenceRef: nativeDocumentEvidenceRef(write.document),
         documentHref: `/${encodeURIComponent(target.issuePrefix)}/issues/${encodeURIComponent(target.identifier ?? this.binding.issueId)}#document-${encodeURIComponent(write.document.key)}`,
       };
     });
@@ -1865,6 +1867,10 @@ export class PaperclipRunnerToolAuthority {
       input,
       async (tx, context) => {
         const suppliedPayload = record(input.payload);
+        const resolverPolicy = input.resolverPolicy === undefined ? undefined : requiredString(input.resolverPolicy);
+        if (resolverPolicy !== undefined && !["anyone", "not_creator", "human_only"].includes(resolverPolicy)) {
+          throw new Error("paperclip_runner_interaction_resolver_policy_invalid");
+        }
         const targetRevisionId = nullableProviderId(input.targetRevisionId);
         const suppliedTarget = record(suppliedPayload.target);
         const inferredPlanningTarget = targetRevisionId !== null
@@ -1897,6 +1903,9 @@ export class PaperclipRunnerToolAuthority {
           kind,
           idempotencyKey,
           sourceRunId: this.binding.runId,
+          ...(resolverPolicy ? { resolverPolicy } : {}),
+          addresseeUserId: nullableProviderId(input.addresseeUserId),
+          addresseeAgentId: nullableProviderId(input.addresseeAgentId),
           title: requiredString(input.title),
           summary: prompt,
           continuationPolicy: requiredString(input.continuationPolicy),

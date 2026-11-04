@@ -4,11 +4,19 @@ import {
   issueThreadInteractions,
   issues,
   statusDecisions,
+  workAssessments,
+  approvals,
+  issueApprovals,
   type Db,
 } from "@paperclipai/db";
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { canonicalizeStoredResolverPolicy } from "../issue-thread-interaction-resolution.js";
+import { nativeReviewReportProblem } from "./native-review-readiness.js";
+import type { NativeEvidenceAssessment } from "./evidence-classifier.js";
+import { readNativeDocumentEvidence } from "./native-document-evidence.js";
+import { issueService } from "../issues.js";
+import { issueTreeControlService } from "../issue-tree-control.js";
 
 export type NativeReviewAssignmentContext = {
   nativeReviewInteractionId: string;
@@ -60,6 +68,72 @@ export type NativeReviewAssignment = {
   sourceDecision: typeof statusDecisions.$inferSelect;
   sourceRun: typeof heartbeatRuns.$inferSelect;
 };
+
+/** Recheck the saved delivery and current gates at admission and under the verdict lock. */
+export async function nativeCompletionReviewBlockReason(db: Db, input: {
+  companyId: string; issueId: string; interaction: Pick<typeof issueThreadInteractions.$inferSelect,
+    "id" | "sourceRunId" | "payload" | "addresseeAgentId" | "addresseeUserId">;
+}): Promise<string | null> {
+  const target = (input.interaction.payload as ReviewPayload)?.target;
+  if (target?.key !== "native_completion_review" || typeof target.revisionId !== "string" ||
+      !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(target.revisionId))
+    return "The completion review has no bound source decision.";
+  const [issue] = await db.select().from(issues).where(and(
+    eq(issues.companyId, input.companyId), eq(issues.id, input.issueId),
+  )).limit(1);
+  const [decision] = await db.select().from(statusDecisions).where(and(
+    eq(statusDecisions.companyId, input.companyId), eq(statusDecisions.issueId, input.issueId),
+    eq(statusDecisions.id, target.revisionId),
+  )).limit(1);
+  if (!issue || !decision || decision.applicationState !== "applied" ||
+      decision.runId !== input.interaction.sourceRunId || issue.lastStatusDecisionId !== decision.id ||
+      issue.status !== "in_review" || Number(issue.statusVersion) !== Number(decision.decisionJson.projectedStatusVersion))
+    return "The completion review is no longer bound to the current task state.";
+  const [assessment] = await db.select().from(workAssessments).where(and(
+    eq(workAssessments.id, decision.assessmentId), eq(workAssessments.companyId, input.companyId),
+    eq(workAssessments.issueId, input.issueId), eq(workAssessments.runId, decision.runId),
+  )).limit(1);
+  const [source] = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.id, decision.runId), eq(heartbeatRuns.companyId, input.companyId),
+    eq(heartbeatRuns.nativeIssueId, input.issueId),
+  )).limit(1);
+  if (!assessment || !source || issue.assigneeAgentId !== source.agentId || issue.assigneeUserId)
+    return "The source worker or saved completion assessment is no longer current.";
+  const saved = assessment.assessmentJson as unknown as NativeEvidenceAssessment;
+  const problem = nativeReviewReportProblem(saved);
+  if (problem) return problem.message;
+  const effects = decision.decisionJson.effects;
+  if (!Array.isArray(effects) || !effects.some(effect => effect?.kind === "bind_reviewer" &&
+      (effect.ownerAgentId ?? null) === input.interaction.addresseeAgentId &&
+      (effect.ownerUserId ?? null) === input.interaction.addresseeUserId))
+    return "The review receiver does not match its saved source decision.";
+  if (issue.executionRunId && issue.executionRunId !== source.id) {
+    const [execution] = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, issue.executionRunId), eq(heartbeatRuns.companyId, input.companyId),
+      eq(heartbeatRuns.nativeIssueId, input.issueId),
+    )).limit(1);
+    if (readNativeReviewAssignmentContext(execution?.contextSnapshot)?.nativeReviewDecisionId !== decision.id)
+      return "A newer worker execution owns this task; this review cannot complete its work.";
+  }
+  const [dependencies, pause, pendingApprovals] = await Promise.all([
+    issueService(db).getDependencyReadiness(input.issueId, db),
+    issueTreeControlService(db).getActivePauseHoldGate(input.companyId, input.issueId),
+    db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
+      eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, input.companyId),
+    )).where(and(eq(issueApprovals.companyId, input.companyId), eq(issueApprovals.issueId, input.issueId),
+      inArray(approvals.status, ["pending", "revision_requested"]))).limit(1),
+  ]);
+  if (pause) return "The recorded pause hold must be released before completion review can proceed.";
+  if (dependencies.unresolvedBlockerCount > 0) return "Unfinished dependencies still own the next action; review cannot complete this task.";
+  if (pendingApprovals.length || issue.executionState?.status === "pending")
+    return "A real approval or configured execution stage is still pending.";
+  const refs = saved.criterionAssessments.flatMap(criterion => criterion.evidenceRefs ?? []).map(evidence => evidence.ref);
+  for (const ref of new Set(refs)) {
+    const document = await readNativeDocumentEvidence(db, { companyId: input.companyId, issueId: input.issueId, ref });
+    if (document && !document.current) return "The submitted document revision is missing or superseded; review the worker's current delivery.";
+  }
+  return null;
+}
 
 export function readNativeReviewAssignmentContext(
   snapshot: unknown,
@@ -212,6 +286,9 @@ export async function getNativeReviewAssignment(
     issueExecutionRunId: input.issueExecutionRunId,
     allowResolvedByRunId: input.allowResolvedByRunId,
   });
+  if (valid && interaction.status === "pending" && await nativeCompletionReviewBlockReason(db, {
+    companyId: input.companyId, issueId: input.issueId, interaction,
+  })) return null;
   return valid ? { interaction, sourceDecision: decision, sourceRun } : null;
 }
 

@@ -1059,7 +1059,8 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
             contractRevision: "corpus-v1",
             objectiveSatisfied: true,
             criteria: [{ criterionId: "objective", status: "satisfied", evidenceRefs: [evidenceRef] }],
-            remainingWork: accepted ? [] : [{ blocksCompletion: true }],
+            remainingWork: accepted || ["named_reviewer_required", "review_required"].includes(completionState)
+              ? [] : [{ blocksCompletion: true }],
           },
           verification: [{ commandOrCheck: "fixture", status: "passed", artifactRef: evidenceRef }],
           blocker: fixture.given.reportedWorkDisposition === "blocked"
