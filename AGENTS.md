@@ -213,7 +213,18 @@ When creating a pull request (via `gh pr create` or any other method), you **mus
 - **Verification** — how a reviewer can confirm it works
 - **Risks** — what could go wrong
 - **Model Used** — the AI model that produced or assisted with the change (provider, exact model ID, context window, capabilities). Write "None — human-authored" if no AI was used.
-- **Checklist** — all items checked
+- **Checklist** — record each item truthfully; apply the fork-delivery scope below when authorized
+
+For an owner-authorized delivery to a fork, fill every template section and
+check only items supported by evidence. Use independent review for consequential
+runtime or security changes and run the applicable checks. A named external
+review service or its numeric score is not an additional prerequisite unless
+the owner requires it. Record unavailable checks and unresolved failures with
+their effect on readiness. A reviewable draft does not establish merge or
+deployment readiness, and material failures must not be waived or marked as
+passed. This scope does not change branch protections or the contribution and
+review requirements for pull requests targeting `paperclipai/paperclip`.
+Forks can be public; keep fixtures generic and omit private operational content.
 
 ## 11. Definition of Done
 

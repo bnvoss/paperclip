@@ -70,12 +70,13 @@ describe("native runtime context files", () => {
     expect(constraints).toContain("before writing the complete user-facing final response.");
     expect(constraints).toContain("If blocked, explain why work cannot continue, name the owner and give the unblock action.");
     for (const description of [PRP_COMPLETION_TOOL_DESCRIPTION, PRP_BLOCK_TOOL_DESCRIPTION]) {
-      expect(description).toContain("If rejected, correct the report and retry.");
+      expect(description).toContain("If rejected, correct the report");
       expect(description).toContain("After acceptance, read the returned outcome");
       expect(description).toContain("end the turn without further tool calls");
     }
     expect(PRP_COMPLETION_TOOL_DESCRIPTION).toContain("do not claim completion while gated");
-    expect(PRP_COMPLETION_TOOL_DESCRIPTION).toContain("supplied link and action");
+    expect(PRP_COMPLETION_TOOL_DESCRIPTION).toContain("in this turn without repeating completed actions");
+    expect(PRP_COMPLETION_TOOL_DESCRIPTION).toContain("Explain any genuine required action with its supplied link");
     expect(PRP_COMPLETION_TOOL_DESCRIPTION).toContain("explicit wait for the next response");
     expect(PRP_BLOCK_TOOL_DESCRIPTION).toContain("its owner, and the action needed to unblock it");
     expect(constraints).not.toContain(
