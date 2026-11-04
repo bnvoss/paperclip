@@ -213,7 +213,7 @@ When creating a pull request (via `gh pr create` or any other method), you **mus
 - **Verification** — how a reviewer can confirm it works
 - **Risks** — what could go wrong
 - **Model Used** — the AI model that produced or assisted with the change (provider, exact model ID, context window, capabilities). Write "None — human-authored" if no AI was used.
-- **Checklist** — record each item truthfully; apply the fork-delivery scope below when authorized
+- **Checklist** — all items checked for upstream contributions; apply the fork-delivery scope below when authorized
 
 For an owner-authorized delivery to a fork, fill every template section and
 check only items supported by evidence. Use independent review for consequential

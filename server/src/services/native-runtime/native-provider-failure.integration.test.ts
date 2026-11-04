@@ -77,7 +77,7 @@ describe("native completed failure diagnostics", () => {
           completionClaim: { contractRevision: completionInput.revision, objectiveSatisfied: true,
             criteria: completionInput.criteria.map(criterion => ({ criterionId: criterion.id, status: "satisfied", evidenceRefs: [] })), remainingWork: [] },
           verification: [], attentionRequests: [{ kind: "review", ownerClass: "agent", targetAgentId: agentId, summary: "Review the completed work" }] };
-        const reviewAssessment = await classifyNativeEvidence({ db, companyId, issueId, runId: sourceRunId, contract: completionInput, result: reviewResult });
+        const reviewAssessment = await classifyNativeEvidence({ db, companyId, issueId, runId: sourceRunId, contract: { ...completionInput }, result: reviewResult });
         await db.insert(nativeRunResults).values({ id: sourceResultId, companyId, issueId, runId: sourceRunId, completionContractId: contract.id, serverFingerprint: sourceResultId, schemaStatus: "accepted", resultJson: reviewResult, canonicalSha256: sourceResultId });
         await db.insert(workAssessments).values({ id: assessmentId, companyId, issueId, runId: sourceRunId, contractId: contract.id, resultId: sourceResultId, triggerKind: "native_result", triggerActorCompanyId: companyId, priorIssueStatus: "in_progress", priorStatusVersion: 0, policyVersion: "fixture", assessmentJson: { ...reviewAssessment }, inputDigest: assessmentId });
         const [reviewIssue] = await db.update(issues).set({ status: "in_review", assigneeAgentId: workerId }).where(eq(issues.id, issueId)).returning();
