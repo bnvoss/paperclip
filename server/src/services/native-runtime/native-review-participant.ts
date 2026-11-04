@@ -4,6 +4,7 @@ import {
   issueThreadInteractions,
   issues,
   statusDecisions,
+  statusDecisionEffects,
   workAssessments,
   approvals,
   issueApprovals,
@@ -69,10 +70,11 @@ export type NativeReviewAssignment = {
   sourceRun: typeof heartbeatRuns.$inferSelect;
 };
 
-/** Recheck the saved delivery and current gates at admission and under the verdict lock. */
+/** Recheck the current review binding and, for acceptance, delivery readiness under the verdict lock. */
 export async function nativeCompletionReviewBlockReason(db: Db, input: {
   companyId: string; issueId: string; interaction: Pick<typeof issueThreadInteractions.$inferSelect,
     "id" | "sourceRunId" | "payload" | "addresseeAgentId" | "addresseeUserId">;
+  returningWork?: boolean;
 }): Promise<string | null> {
   const target = (input.interaction.payload as ReviewPayload)?.target;
   if (target?.key !== "native_completion_review" || typeof target.revisionId !== "string" ||
@@ -100,13 +102,18 @@ export async function nativeCompletionReviewBlockReason(db: Db, input: {
   if (!assessment || !source || issue.assigneeAgentId !== source.agentId || issue.assigneeUserId)
     return "The source worker or saved completion assessment is no longer current.";
   const saved = assessment.assessmentJson as unknown as NativeEvidenceAssessment;
-  const problem = nativeReviewReportProblem(saved);
-  if (problem) return problem.message;
   const effects = decision.decisionJson.effects;
   if (!Array.isArray(effects) || !effects.some(effect => effect?.kind === "bind_reviewer" &&
       (effect.ownerAgentId ?? null) === input.interaction.addresseeAgentId &&
       (effect.ownerUserId ?? null) === input.interaction.addresseeUserId))
     return "The review receiver does not match its saved source decision.";
+  const [receiver] = await db.select({ id: statusDecisionEffects.id }).from(statusDecisionEffects).where(and(
+    eq(statusDecisionEffects.companyId, input.companyId), eq(statusDecisionEffects.issueId, input.issueId),
+    eq(statusDecisionEffects.decisionId, decision.id), eq(statusDecisionEffects.effectKind, "bind_reviewer"),
+    eq(statusDecisionEffects.targetType, "issue_thread_interaction"), eq(statusDecisionEffects.targetId, input.interaction.id),
+    eq(statusDecisionEffects.deliveryState, "delivered"),
+  )).limit(1);
+  if (!receiver) return "The review request has no delivered receiver binding in its source decision.";
   if (issue.executionRunId && issue.executionRunId !== source.id) {
     const [execution] = await db.select().from(heartbeatRuns).where(and(
       eq(heartbeatRuns.id, issue.executionRunId), eq(heartbeatRuns.companyId, input.companyId),
@@ -115,6 +122,11 @@ export async function nativeCompletionReviewBlockReason(db: Db, input: {
     if (readNativeReviewAssignmentContext(execution?.contextSnapshot)?.nativeReviewDecisionId !== decision.id)
       return "A newer worker execution owns this task; this review cannot complete its work.";
   }
+  // Returning changes never accepts unfinished work or clears a gate. It still
+  // needs the current source/receiver binding so stale cards cannot alter newer work.
+  if (input.returningWork) return null;
+  const problem = nativeReviewReportProblem(saved);
+  if (problem) return problem.message;
   const [dependencies, pause, pendingApprovals] = await Promise.all([
     issueService(db).getDependencyReadiness(input.issueId, db),
     issueTreeControlService(db).getActivePauseHoldGate(input.companyId, input.issueId),
@@ -286,9 +298,6 @@ export async function getNativeReviewAssignment(
     issueExecutionRunId: input.issueExecutionRunId,
     allowResolvedByRunId: input.allowResolvedByRunId,
   });
-  if (valid && interaction.status === "pending" && await nativeCompletionReviewBlockReason(db, {
-    companyId: input.companyId, issueId: input.issueId, interaction,
-  })) return null;
   return valid ? { interaction, sourceDecision: decision, sourceRun } : null;
 }
 

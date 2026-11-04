@@ -9,11 +9,11 @@ type ReviewAssessment = Pick<NativeEvidenceAssessment,
 /** This existing review path can close its issue; input decisions use native interactions. */
 export function nativeReviewReportProblem(assessment: ReviewAssessment): { code: string; message: string } | null {
   const requests = assessment.attentionRequests;
-  if (!Array.isArray(requests) || requests.length === 0 || requests.some(request => request.kind !== "review")) {
-    return { code: "native_attention_requires_native_workflow", message: "Use request_human_input for a concrete input or reserved human decision, the existing approval path for governed actions, and native delegation for another agent's work. These are not task-completion approvals. Keep the task with its worker and wait on the saved request or dependency." };
-  }
   if (Array.isArray(assessment.criterionAssessments) && assessment.criterionAssessments.some(criterion => criterion.claimStatus === "unknown")) {
     return { code: "native_review_outcome_unknown", message: "The submitted outcome is unknown. Preserve the source worker, history, and any existing hold. Reconcile the saved outcome before deciding whether work can resume; do not replay a tool action or ask a reviewer to approve completion as a substitute for reconciliation." };
+  }
+  if (!Array.isArray(requests) || requests.length === 0 || requests.some(request => request.kind !== "review")) {
+    return { code: "native_attention_requires_native_workflow", message: "Use request_human_input for a concrete input or reserved human decision, the existing approval path for governed actions, and native delegation for another agent's work. These are not task-completion approvals. Keep the task with its worker and wait on the saved request or dependency." };
   }
   if (assessment.reportedDisposition !== "needs_review" || assessment.contractRevisionMatches !== true ||
       assessment.objectiveClaimSatisfied !== true || assessment.hasFailedVerification !== false ||

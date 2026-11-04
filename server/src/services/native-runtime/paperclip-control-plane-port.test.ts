@@ -47,7 +47,7 @@ import { finalizeNativeRun } from "./native-run-finalizer.js";
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueService } from "../issues.js";
-import { claimNativeReviewExecutionLock, getNativeReviewAssignment } from "./native-review-participant.js";
+import { claimNativeReviewExecutionLock, getNativeReviewAssignment, nativeCompletionReviewBlockReason } from "./native-review-participant.js";
 import { claimQueuedNativeReviewRun } from "./native-review-dispatch.js";
 import { stageNativeRunnerWakeAttachments } from "./native-runner-file-handoff.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
@@ -1158,16 +1158,16 @@ describe("PaperclipControlPlanePort conformance", () => {
     const [lateDependency] = await db.insert(issueRelations).values({ companyId: identity.companyId,
       issueId: unfinishedId, relatedIssueId: issueId, type: "blocks" }).returning();
     await expect(getNativeReviewAssignment(db, { companyId: identity.companyId, issueId, agentId: reviewerAgentId,
-      contextSnapshot: reviewWakes[0]!.payload })).resolves.toBeNull();
+      contextSnapshot: reviewWakes[0]!.payload })).resolves.toMatchObject({ interaction: { id: agentReview.id } });
     const [humanReview] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.addresseeUserId, "reviewer-24"));
-    await expect(issueThreadInteractionService(db).acceptInteraction({ id: issueId, companyId: identity.companyId },
+    await expect(issueThreadInteractionService(db).acceptInteraction({ id: issueId, companyId: identity.companyId, projectId: null, goalId: null },
       humanReview!.id, {}, { userId: "reviewer-24" })).rejects.toThrow("dependencies");
     await db.delete(issueRelations).where(eq(issueRelations.id, lateDependency!.id));
     const [pause] = await db.insert(issueTreeHolds).values({ companyId: identity.companyId, rootIssueId: issueId,
       mode: "pause", reason: "Preserve the operator hold" }).returning();
     await expect(getNativeReviewAssignment(db, { companyId: identity.companyId, issueId, agentId: reviewerAgentId,
-      contextSnapshot: reviewWakes[0]!.payload })).resolves.toBeNull();
-    await expect(issueThreadInteractionService(db).acceptInteraction({ id: issueId, companyId: identity.companyId },
+      contextSnapshot: reviewWakes[0]!.payload })).resolves.toMatchObject({ interaction: { id: agentReview.id } });
+    await expect(issueThreadInteractionService(db).acceptInteraction({ id: issueId, companyId: identity.companyId, projectId: null, goalId: null },
       humanReview!.id, {}, { userId: "reviewer-24" })).rejects.toThrow("pause hold");
     await db.update(issueTreeHolds).set({ status: "released", releasedAt: new Date(), releaseReason: "Explicit fixture release" })
       .where(eq(issueTreeHolds.id, pause!.id));
@@ -1213,6 +1213,17 @@ describe("PaperclipControlPlanePort conformance", () => {
       .from(agentWakeupRequests).where(eq(agentWakeupRequests.id, reviewWakes[0]!.id)))
       .resolves.toEqual([{ status: "queued" }]);
     await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, issueId));
+    const [dispatchPause] = await db.insert(issueTreeHolds).values({ companyId: identity.companyId, rootIssueId: issueId,
+      mode: "pause", reason: "Defer the existing reviewer wake" }).returning();
+    await expect(createPostgresRunDispatchAdapter(db).cancelStaleQueuedRun({
+      companyId: identity.companyId, runId: reviewRunId, expectedStatus: "queued", now: new Date(),
+    })).resolves.toMatchObject({ outcome: "not_stale" });
+    await expect(claimQueuedNativeReviewRun(db, {
+      run: reviewRun!, agentNameKey: "reviewer", claimedAt: new Date(), claimValues: {},
+    })).resolves.toBeNull();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, reviewWakes[0]!.id)))[0])
+      .toMatchObject({ status: "queued" });
+    await db.update(issueTreeHolds).set({ status: "released", releasedAt: new Date() }).where(eq(issueTreeHolds.id, dispatchPause!.id));
     await expect(claimQueuedNativeReviewRun(db, {
       run: reviewRun!, agentNameKey: "reviewer", claimedAt: new Date(), claimValues: {},
     })).resolves.toMatchObject({ id: reviewRunId, status: "running" });
@@ -1431,13 +1442,11 @@ describe("PaperclipControlPlanePort conformance", () => {
         { systemId: "test-multiple-reviewers", runId },
       ));
     }
-    await issueThreadInteractionService(db).rejectInteraction(
+    await expect(issueThreadInteractionService(db).rejectInteraction(
       { id: issueId, companyId: identity.companyId }, reviews[0]!.id,
       { reason: "Needs another change" }, { userId: "reviewer-24" },
-    );
-    // Even if another actor puts the task back in review, a declined decision
-    // in the same review round must not be erased by another reviewer's approval.
-    await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, issueId));
+    )).rejects.toThrow("bound source decision");
+    // Unbound legacy targets cannot change current work through either verdict.
     await expect(issueThreadInteractionService(db).acceptInteraction(
       { id: issueId, companyId: identity.companyId, projectId: null, goalId: null, status: "in_review" },
       reviews[1]!.id, {}, { userId: "reviewer-24" },
@@ -1445,6 +1454,101 @@ describe("PaperclipControlPlanePort conformance", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]!.status).toBe("in_review");
     await db.update(heartbeatRuns).set({ wakeupRequestId: null }).where(eq(heartbeatRuns.id, reviewRunId));
 
+  });
+
+  it("returns a rejected review round and resumes the worker without retaining obsolete acceptance gates", async () => {
+    const identity = CONTROL_PLANE_CONFORMANCE_OPEN.identity;
+    const childId = randomUUID(), parentId = randomUUID(), managerId = randomUUID(), peerId = randomUUID(), contractId = randomUUID();
+    const userId = `reserved-decision-${randomUUID()}`;
+    await db.insert(authUsers).values({ id: userId, name: "Reserved decision owner", email: `${userId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId: identity.companyId, principalType: "user", principalId: userId, status: "active", membershipRole: "member" });
+    await db.insert(agents).values([
+      { id: managerId, companyId: identity.companyId, name: "Delivery manager", adapterType: "codex_local", status: "idle" },
+      { id: peerId, companyId: identity.companyId, name: "Output specialist", adapterType: "codex_local", status: "idle" },
+    ]);
+    await db.insert(issues).values([
+      { id: parentId, companyId: identity.companyId, title: "Larger outcome", status: "blocked", assigneeAgentId: managerId },
+      { id: childId, companyId: identity.companyId, parentId, title: "Bounded delivery", status: "in_progress", assigneeAgentId: identity.agentId },
+    ]);
+    await db.insert(issueRelations).values({ companyId: identity.companyId, issueId: childId, relatedIssueId: parentId, type: "blocks" });
+    await db.insert(completionContracts).values({ id: contractId, companyId: identity.companyId, issueId: childId, revision: 1,
+      schemaVersion: "paperclip.completion-contract.v1", policyVersion: "phase6-v4", risk: "low", completionAuthority: "agent_claim_policy",
+      incompleteCriteriaPolicy: "preserve_non_terminal", contractJson: { revision: "1", criteria: [{ id: "objective", requirement: "Deliver the bounded output" }] },
+      canonicalSha256: "review-return-contract", createdByActorType: "system", createdByActorId: "test" });
+    async function submit(reviewers: string[]) {
+      const runId = randomUUID(), runnerId = randomUUID();
+      await db.insert(heartbeatRuns).values({ id: runId, companyId: identity.companyId, agentId: identity.agentId, status: "running",
+        runtimeMode: "native", nativeIssueId: childId, completionContractId: contractId, completionContractSha256: "review-return-contract",
+        nativeSessionId: identity.sessionId, runnerInstanceId: runnerId, contextSnapshot: { issueId: childId } });
+      await db.update(issues).set({ executionRunId: runId, status: "in_progress" }).where(eq(issues.id, childId));
+      const port = new PaperclipControlPlanePort(db, { companyId: identity.companyId, issueId: childId, runId, agentId: identity.agentId,
+        sessionId: identity.sessionId, completionContractId: contractId, completionContractSha256: "review-return-contract",
+        sourceInstanceId: runnerId, controlPlaneSourceInstanceId: `review-return-${runId}` });
+      await port.openRun({ identity: { ...identity, issueId: childId, runId }, backendKind: "mock", sourceInstanceId: runnerId });
+      const result: PrpStructuredRunResult = { ...structuredClone(CONTROL_PLANE_CONFORMANCE_RESULT), reportedWorkDisposition: "needs_review",
+        completionClaim: { contractRevision: "1", objectiveSatisfied: true, criteria: [{ criterionId: "objective", status: "satisfied", evidenceRefs: [] }], remainingWork: [] },
+        attentionRequests: reviewers.map(targetAgentId => ({ kind: "review", ownerClass: "agent", targetAgentId, summary: "Review the current delivery" })) };
+      await nativeCompletionFeedback(db, runId, result);
+      await port.completeRun({ result, terminal: { ...CONTROL_PLANE_CONFORMANCE_TERMINAL, reportedWorkDisposition: "needs_review" }, callerResultId: runId });
+      await finalizeNativeRun({ db, runId, workspaceFinalizeStatus: "succeeded", projectRunStatus: true });
+      // Model the worker's ordinary terminal lock release before reviewer admission.
+      await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, childId));
+      return (await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.sourceRunId, runId)));
+    }
+    async function receive(card: typeof issueThreadInteractions.$inferSelect, reviewerId: string) {
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `native-review:${card.id}`));
+      const runId = randomUUID(), target = (card.payload as { target: { revisionId: string } }).target;
+      const context = { issueId: childId, nativeReviewInteractionId: card.id, nativeReviewDecisionId: target.revisionId };
+      const [run] = await db.insert(heartbeatRuns).values({ id: runId, companyId: identity.companyId, agentId: reviewerId,
+        status: "queued", runtimeMode: "native", nativeIssueId: childId, wakeupRequestId: wake!.id, contextSnapshot: context }).returning();
+      await db.update(agentWakeupRequests).set({ runId }).where(eq(agentWakeupRequests.id, wake!.id));
+      expect(await claimQueuedNativeReviewRun(db, { run: run!, agentNameKey: "reviewer", claimedAt: new Date(), claimValues: {} }))
+        .toMatchObject({ status: "running" });
+      return { runId, context };
+    }
+    const first = await submit([managerId, peerId]);
+    const managerCard = first.find(card => card.addresseeAgentId === managerId)!;
+    const peerCard = first.find(card => card.addresseeAgentId === peerId)!;
+    // Copying a decision and receiver does not bind another interaction to its effects.
+    for (const returningWork of [false, true]) {
+      expect(await nativeCompletionReviewBlockReason(db, { companyId: identity.companyId, issueId: childId,
+        interaction: { ...managerCard, id: randomUUID() }, returningWork }))
+        .toContain("no delivered receiver binding");
+    }
+    const reserved = await issueThreadInteractionService(db).create({ id: childId, companyId: identity.companyId }, {
+      kind: "request_confirmation", title: "Reserved optional scope", sourceRunId: managerCard.sourceRunId!,
+      resolverPolicy: "human_only", addresseeUserId: userId, continuationPolicy: "wake_assignee",
+      payload: { version: 1, prompt: "Decide the optional scope separately", acceptLabel: "Allow", rejectLabel: "Decline",
+        target: { type: "custom", key: "reserved_optional_scope", revisionId: randomUUID() } },
+    }, { systemId: "test-reserved-input" });
+    const reviewer = await receive(managerCard, managerId);
+    const [lateDependency] = await db.insert(issues).values({ companyId: identity.companyId, title: "Late required verification", status: "blocked", assigneeAgentId: identity.agentId }).returning();
+    const [edge] = await db.insert(issueRelations).values({ companyId: identity.companyId, issueId: lateDependency!.id, relatedIssueId: childId, type: "blocks" }).returning();
+    expect(await getNativeReviewAssignment(db, { companyId: identity.companyId, issueId: childId, agentId: managerId, contextSnapshot: reviewer.context }))
+      .toMatchObject({ interaction: { id: managerCard.id } });
+    await issueThreadInteractionService(db).rejectInteraction({ id: childId, companyId: identity.companyId }, managerCard.id,
+      { reason: "Return the delivery for the missing verification" }, { agentId: managerId, runId: reviewer.runId });
+    expect((await db.select().from(issues).where(eq(issues.id, childId)))[0])
+      .toMatchObject({ status: "todo", assigneeAgentId: identity.agentId, completedAt: null });
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, peerCard.id)))[0])
+      .toMatchObject({ status: "cancelled", result: { outcome: "withdrawn" } });
+    expect(await getNativeReviewAssignment(db, { companyId: identity.companyId, issueId: childId, agentId: peerId,
+      contextSnapshot: { nativeReviewInteractionId: peerCard.id, nativeReviewDecisionId: reviewer.context.nativeReviewDecisionId } })).toBeNull();
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, reserved.id)))[0])
+      .toMatchObject({ status: "pending", effectiveResolverPolicy: "human_only" });
+    await issueThreadInteractionService(db).rejectInteraction({ id: childId, companyId: identity.companyId }, reserved.id,
+      { reason: "Keep the optional scope out of this delivery" }, { userId });
+    await db.delete(issueRelations).where(eq(issueRelations.id, edge!.id));
+    const revised = await submit([managerId]);
+    expect(revised).toHaveLength(1);
+    const finalReviewer = await receive(revised[0]!, managerId);
+    await issueThreadInteractionService(db).acceptInteraction({ id: childId, companyId: identity.companyId, projectId: null, goalId: null }, revised[0]!.id,
+      {}, { agentId: managerId, runId: finalReviewer.runId });
+    expect((await db.select().from(issues).where(eq(issues.id, childId)))[0])
+      .toMatchObject({ status: "done", assigneeAgentId: identity.agentId });
+    expect((await db.select().from(issues).where(eq(issues.id, parentId)))[0])
+      .toMatchObject({ assigneeAgentId: managerId, completedAt: null });
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, managerCard.id)))[0]?.status).toBe("rejected");
   });
 
   it("completes DOT-29-style low-risk work with an environment caveat and no corrective run", async () => {
@@ -1686,7 +1790,7 @@ describe("PaperclipControlPlanePort conformance", () => {
     });
   });
 
-  it("returns a rejected native completion review to the original agent with the reviewer reason", async () => {
+  it("preserves current work when a legacy review lacks a bound source decision", async () => {
     const identity = CONTROL_PLANE_CONFORMANCE_OPEN.identity;
     const issueId = "30000000-0000-4000-8000-000000000027";
     await db.insert(issues).values({
@@ -1718,19 +1822,16 @@ describe("PaperclipControlPlanePort conformance", () => {
       },
     }).returning();
 
-    const rejected = await issueThreadInteractionService(db).rejectInteraction(
+    await expect(issueThreadInteractionService(db).rejectInteraction(
       { id: issueId, companyId: identity.companyId, status: "in_review" },
       interaction!.id,
       { reason: "Add the missing external verification." },
       { userId: "reviewer-25" },
-    );
-
-    expect(rejected).toMatchObject({
-      status: "rejected",
-      result: { outcome: "rejected", reason: "Add the missing external verification." },
-    });
+    )).rejects.toThrow("bound source decision");
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction!.id)))[0])
+      .toMatchObject({ status: "pending", result: null });
     await expect(db.select().from(issues).where(eq(issues.id, issueId))).resolves.toEqual([
-      expect.objectContaining({ status: "todo", assigneeAgentId: identity.agentId }),
+      expect.objectContaining({ status: "in_review", assigneeAgentId: identity.agentId }),
     ]);
   });
 

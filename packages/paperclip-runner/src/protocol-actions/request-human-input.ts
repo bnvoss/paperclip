@@ -3,7 +3,6 @@ import { questionPayloadSchema, questionsPayloadRequirement } from "./question-p
 const interactionAudienceProperties = {
   resolverPolicy: { enum: ["anyone", "not_creator", "human_only"], description: "Use human_only for an explicitly reserved human decision. Coordination input retains its open default. A response resumes unfinished work rather than accepting task completion." },
   addresseeUserId: { type: ["string", "null"], minLength: 1, maxLength: 240, description: "Exact authorized human recipient when a specific person is required." },
-  addresseeAgentId: { type: ["string", "null"], minLength: 1, maxLength: 240, description: "Exact native agent for coordination; do not substitute a human relay or a different runtime's agent." },
 } as const;
 
 /** Canonical definition and documentation for `request_human_input`. */

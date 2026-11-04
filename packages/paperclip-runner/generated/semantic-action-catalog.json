@@ -749,14 +749,6 @@
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "addresseeAgentId": {
-          "description": "Exact native agent recipient for a coordination request; do not create a human relay.",
-          "maxLength": 240,
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "addresseeUserId": {
           "description": "Exact authorized human recipient, when a specific person is required.",
           "maxLength": 240,

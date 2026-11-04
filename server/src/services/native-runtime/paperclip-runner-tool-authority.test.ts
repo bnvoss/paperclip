@@ -106,6 +106,8 @@ describe("PaperclipRunnerToolAuthority", () => {
     const authority = new PaperclipRunnerToolAuthority(db, { companyId, issueId: taskId, agentId, runId: taskRunId });
     expect(authority.definitions().find(tool => tool.name === "request_human_input")?.inputSchema)
       .toMatchObject({ properties: { resolverPolicy: { enum: ["anyone", "not_creator", "human_only"] }, addresseeUserId: expect.any(Object) } });
+    expect((authority.definitions().find(tool => tool.name === "request_human_input")?.inputSchema as { properties: object }).properties)
+      .not.toHaveProperty("addresseeAgentId");
     const request = { tool: "request_human_input", callId: "proposal", arguments: {
       idempotencyKey: "proposal", interactionKind: "confirmation", title: "Choose the proposed scope",
       prompt: "Accept or return this proposal; implementation is still unfinished.",

@@ -68,6 +68,16 @@ describe("native status authority", () => {
     const unknown = arbitrate({ assessment: requestedReview({ criterionAssessments: [{ criterionId: "objective", claimStatus: "unknown", outcome: "unverifiable", evidenceRefs: [], reasonCode: "unknown_effect" }] }) });
     expect(unknown.effects).toContainEqual(expect.objectContaining({ kind: "record_recovery", agentId: "agent" }));
     expect(unknown.effects.some(effect => ["enqueue_continuation", "schedule_retry", "bind_reviewer"].includes(effect.kind))).toBe(false);
+    for (const attentionRequests of [[], [{ kind: "approval" as const, ownerClass: "human" as const, targetAgentId: null,
+      summary: "Review the uncertain outcome", sourceIndex: 0, sourceKind: "approval", legacy: false }],
+      [...requestedReview().attentionRequests, { kind: "human_input" as const, ownerClass: "human" as const, targetAgentId: null,
+        summary: "Clarify next action", sourceIndex: 1, sourceKind: "human_input", legacy: false }]]) {
+      const decision = arbitrate({ assessment: requestedReview({ attentionRequests, criterionAssessments: [{
+        criterionId: "objective", claimStatus: "unknown", outcome: "unverifiable", evidenceRefs: [], reasonCode: "unknown_effect",
+      }] }) });
+      expect(decision.effects).toContainEqual(expect.objectContaining({ kind: "record_recovery", agentId: "agent" }));
+      expect(decision.effects.some(effect => ["enqueue_continuation", "schedule_retry", "bind_reviewer"].includes(effect.kind))).toBe(false);
+    }
   });
 
   it("preserves a pause instead of creating review or waking another actor", () => {

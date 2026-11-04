@@ -64,6 +64,10 @@ records. It recognizes these evidence families:
 - issue-thread interactions; and
 - attachments.
 
+Native document references bind the exact document and revision. A saved
+document proves persistence only. It does not prove that its claims or the
+task outcome are correct.
+
 Each evidence reference becomes one of:
 
 | Outcome | Meaning |
@@ -354,7 +358,7 @@ document establishes persistence, not independent acceptance of its content.
 | --- | --- | --- |
 | Intake and assignment | The assignee, under ordinary assignment and checkout rules | One worker owns the outcome and remaining work. |
 | Delegated result and receiving | The child worker delivers; the named reviewer or authorized external receiver decides | A complete child can be reviewed while its manager's parent remains blocked. Parent context includes the verdict. |
-| Review admission | The server checks the saved report, exact receiver, invokability, ownership, dependencies, and pause | The scoped reviewer receives execution authority; the worker retains the issue. |
+| Review admission | The server checks the source decision, exact receiver, invokability and ownership; a pause defers the existing queued claim | The scoped reviewer can inspect and return changes. Temporary acceptance constraints do not consume its wake. |
 | Completion feedback | The server reports current constraints and the saved recipient | Agent review stays with that agent; the user is not asked to relay or accept it. Real human decisions remain visible. |
 | Hold and recovery | The existing hold or recovery owner retains authority | Unknown outcomes stay owned. Review cannot release a hold, replay an action, or hide approval. |
 | Resumption and closure | The worker resumes from input or returned changes; a valid verdict closes only its bound issue | Admission and acceptance recheck current state. Existing finalization and continuation idempotency remains effective. |
@@ -414,11 +418,16 @@ the acting run is running, holds the execution lock, and names this exact card
 and decision. Another run for the same agent cannot resolve the card. An old or
 reassigned review does not grant access to newer work.
 
-Admission and acceptance also verify the saved delivery and its receiver against
-the applied source decision. A newly added dependency, pause, formal approval,
+Review authority stays bound to its applied source decision. Positive acceptance
+also verifies the saved delivery. A newly added dependency, pause, formal approval,
 configured execution stage, newer worker, or superseded document prevents the
 old review from completing the task. Acceptance runs under the existing issue
-verdict lock and applies these checks to human decisions too.
+verdict lock and applies these checks to human decisions too. A current reviewer
+can return changes while acceptance is blocked, without releasing the hold.
+Returning a delivery neutrally withdraws only unanswered cards proven by the
+same applied decision and effect ledger. Resolved verdicts and unrelated input or
+approval gates remain intact. The worker can then submit its revised delivery
+through the existing review path.
 
 The final required acceptance completes the child through the existing review
 resolution path and makes its blocked dependents eligible to run. Rejection

@@ -1867,6 +1867,9 @@ export class PaperclipRunnerToolAuthority {
       input,
       async (tx, context) => {
         const suppliedPayload = record(input.payload);
+        if (input.addresseeAgentId !== undefined && input.addresseeAgentId !== null) {
+          throw new Error("Use native delegation or a named completion review for an agent recipient; request_human_input does not dispatch agent work.");
+        }
         const resolverPolicy = input.resolverPolicy === undefined ? undefined : requiredString(input.resolverPolicy);
         if (resolverPolicy !== undefined && !["anyone", "not_creator", "human_only"].includes(resolverPolicy)) {
           throw new Error("paperclip_runner_interaction_resolver_policy_invalid");
@@ -1905,7 +1908,6 @@ export class PaperclipRunnerToolAuthority {
           sourceRunId: this.binding.runId,
           ...(resolverPolicy ? { resolverPolicy } : {}),
           addresseeUserId: nullableProviderId(input.addresseeUserId),
-          addresseeAgentId: nullableProviderId(input.addresseeAgentId),
           title: requiredString(input.title),
           summary: prompt,
           continuationPolicy: requiredString(input.continuationPolicy),

@@ -241,7 +241,6 @@ const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
         payload: openObject,
         resolverPolicy: { enum: ["anyone", "not_creator", "human_only"] },
         addresseeUserId: nullableText("Exact authorized human recipient, when a specific person is required.", 240),
-        addresseeAgentId: nullableText("Exact native agent recipient for a coordination request; do not create a human relay.", 240),
         targetRevisionId: nullableText(
           "Optional bound document revision.",
           240,

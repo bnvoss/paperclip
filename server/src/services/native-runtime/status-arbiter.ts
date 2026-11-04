@@ -386,8 +386,9 @@ export function arbitrateNativeStatus(input: {
   }
   // A completion claim is not a request for human approval. Only a concrete,
   // explicitly reported attention request may create a review interaction.
-  if (input.assessment.attentionRequests.length > 0) {
-    const problem = nativeReviewReportProblem(input.assessment);
+  const reviewProblem = nativeReviewReportProblem(input.assessment);
+  if (input.assessment.attentionRequests.length > 0 || reviewProblem?.code === "native_review_outcome_unknown") {
+    const problem = reviewProblem;
     if (problem) return {
       policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
       statusAction: "in_progress", toStatus: "in_progress", reasonCode: problem.code, unblockDescriptor: null,
