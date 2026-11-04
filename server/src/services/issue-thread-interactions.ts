@@ -34,6 +34,8 @@ import {
   issueQuestionResponseDeliveries,
   issueThreadInteractions,
   issues,
+  statusDecisions,
+  statusDecisionEffects,
   toolActionRequests,
   toolOauthStates,
 } from "@paperclipai/db";
@@ -102,11 +104,12 @@ import { isCloudManagedInstance } from "./cloud-instance.js";
 import { resolveDeploymentMode } from "../config-file.js";
 import {
   logActivity,
+  persistActivity,
   publishActivity,
   type ActivityPublication,
 } from "./activity-log.js";
 import { evaluateAgentInvokabilityFromDb } from "./agent-invokability.js";
-import { getNativeReviewAssignment } from "./native-runtime/native-review-participant.js";
+import { getNativeReviewAssignment, nativeCompletionReviewBlockReason } from "./native-runtime/native-review-participant.js";
 import {
   assertIssueReviewVerdictActorAllowed,
   isIssueReviewVerdictInteraction,
@@ -377,6 +380,55 @@ function isNativeCompletionReview(
       ? (payload.target as Record<string, unknown>)
       : {};
   return target.type === "custom" && target.key === "native_completion_review";
+}
+
+/** A returned delivery makes only its unanswered, ledger-bound review round obsolete. */
+async function withdrawReturnedNativeReviewRound(tx: Db, current: IssueThreadInteractionRow, publications: ActivityPublication[]) {
+  if (!isNativeCompletionReview(current) || !current.sourceRunId) return [];
+  const target = (current.payload as { target?: { revisionId?: string } }).target;
+  const decisionId = target?.revisionId;
+  if (!decisionId || !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(decisionId)) return [];
+  const [bound] = await tx.select({ id: statusDecisions.id }).from(statusDecisions)
+    .innerJoin(statusDecisionEffects, and(eq(statusDecisionEffects.decisionId, statusDecisions.id),
+      eq(statusDecisionEffects.companyId, current.companyId), eq(statusDecisionEffects.issueId, current.issueId),
+      eq(statusDecisionEffects.effectKind, "bind_reviewer"), eq(statusDecisionEffects.targetType, "issue_thread_interaction"),
+      eq(statusDecisionEffects.deliveryState, "delivered"),
+      eq(statusDecisionEffects.targetId, current.id)))
+    .where(and(eq(statusDecisions.id, decisionId), eq(statusDecisions.companyId, current.companyId),
+      eq(statusDecisions.issueId, current.issueId), eq(statusDecisions.runId, current.sourceRunId),
+      eq(statusDecisions.applicationState, "applied"))).limit(1);
+  if (!bound) return [];
+  const pending = await tx.select({ interaction: issueThreadInteractions }).from(issueThreadInteractions)
+    .innerJoin(statusDecisionEffects, and(eq(statusDecisionEffects.companyId, current.companyId),
+      eq(statusDecisionEffects.issueId, current.issueId), eq(statusDecisionEffects.decisionId, decisionId),
+      eq(statusDecisionEffects.effectKind, "bind_reviewer"), eq(statusDecisionEffects.targetType, "issue_thread_interaction"),
+      eq(statusDecisionEffects.deliveryState, "delivered"),
+      sql`${statusDecisionEffects.targetId} = ${issueThreadInteractions.id}::text`))
+    .where(and(eq(issueThreadInteractions.companyId, current.companyId), eq(issueThreadInteractions.issueId, current.issueId),
+      eq(issueThreadInteractions.sourceRunId, current.sourceRunId), eq(issueThreadInteractions.kind, "request_confirmation"),
+      eq(issueThreadInteractions.status, "pending"),
+      sql`${issueThreadInteractions.payload}->'target'->>'type' = 'custom'`,
+      sql`${issueThreadInteractions.payload}->'target'->>'key' = 'native_completion_review'`,
+      sql`${issueThreadInteractions.payload}->'target'->>'revisionId' = ${decisionId}`,
+      sql`${issueThreadInteractions.payload}->'toolAction' is null`, sql`${issueThreadInteractions.payload}->'secretProposal' is null`));
+  const withdrawn: IssueThreadInteraction[] = [];
+  const reason = "This delivery was returned for changes. The worker must submit a revised delivery. No verdict was recorded for this unanswered request.";
+  for (const { interaction } of pending) {
+    const [updated] = await tx.update(issueThreadInteractions).set({ status: "cancelled",
+      result: buildAdministrativeOutcomeResult(interaction, "withdrawn", reason),
+      resolvedByAgentId: null, resolvedByUserId: null, resolvedByRunId: null, resolvedAt: new Date(), updatedAt: new Date(),
+    }).where(and(eq(issueThreadInteractions.id, interaction.id), eq(issueThreadInteractions.status, "pending"))).returning();
+    if (!updated) continue;
+    const receipt = await persistActivity(tx, { companyId: current.companyId, actorType: "system", actorId: "native-review-lifecycle",
+      action: "issue.thread_interaction_withdrawn", entityType: "issue", entityId: current.issueId,
+      details: { interactionId: interaction.id, sourceRunId: current.sourceRunId, decisionId, returnedInteractionId: current.id,
+        source: "native_review_return", reason } });
+    publications.push(receipt.publication);
+    const item = hydrateInteraction(updated);
+    await enqueueTerminalIssueInteractionChatPublications(tx, item);
+    withdrawn.push(item);
+  }
+  return withdrawn;
 }
 
 export const DEFAULT_RESOLVER_POLICY_BY_KIND: Record<
@@ -2218,6 +2270,13 @@ export function issueThreadInteractionService(
         args.actor,
       );
 
+      if (isNativeCompletionReview(lockedCurrent)) {
+        const reason = await nativeCompletionReviewBlockReason(tx as unknown as Db, {
+          companyId: issueContext.companyId, issueId: issueContext.id, interaction: lockedCurrent,
+        });
+        if (reason) throw conflict(reason);
+      }
+
       const interaction = hydrateInteraction(lockedCurrent);
       const selectedOptionIds =
         interaction.kind === "request_checkbox_confirmation"
@@ -2441,6 +2500,8 @@ export function issueThreadInteractionService(
     }
 
     const now = new Date();
+    const postCommitActivityPublications: ActivityPublication[] = [];
+    let withdrawnRound: IssueThreadInteraction[] = [];
     const updated = await db.transaction(async (tx) => {
       await assertInteractionRunWriteAllowed(tx as unknown as Db, args.issue, args.actor);
       await args.mutationOptions?.beforeResolveInTransaction?.(tx);
@@ -2497,6 +2558,12 @@ export function issueThreadInteractionService(
         args.actor,
       );
 
+      if (isNativeCompletionReview(lockedCurrent)) {
+        const reason = await nativeCompletionReviewBlockReason(tx as unknown as Db, {
+          companyId: issueContext.companyId, issueId: issueContext.id, interaction: lockedCurrent, returningWork: true,
+        });
+        if (reason) throw conflict(reason);
+      }
       await resolveLinkedSecretProposal(tx as unknown as Db, lockedCurrent, {
         status: "rejected",
         actor: args.actor,
@@ -2544,6 +2611,7 @@ export function issueThreadInteractionService(
         );
       }
       const rejectedInteraction = hydrateInteraction(resolved);
+      withdrawnRound = await withdrawReturnedNativeReviewRound(tx as unknown as Db, resolved, postCommitActivityPublications);
       await args.mutationOptions?.afterResolveInTransaction?.(
         tx,
         rejectedInteraction,
@@ -2584,7 +2652,11 @@ export function issueThreadInteractionService(
     });
 
     const rejected = hydrateInteraction(updated);
-    const publish = (committedDb: Db) => emitInteractionResolvedTelemetry(committedDb, rejected);
+    const publish = async (committedDb: Db) => {
+      for (const publication of postCommitActivityPublications) publishActivity(publication);
+      for (const withdrawn of withdrawnRound) await emitInteractionResolvedTelemetry(committedDb, withdrawn);
+      await emitInteractionResolvedTelemetry(committedDb, rejected);
+    };
     if (args.mutationOptions?.deferConfirmationCommitEffects) args.mutationOptions.deferConfirmationCommitEffects(publish);
     else await publish(db);
     return rejected;

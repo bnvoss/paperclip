@@ -20,6 +20,7 @@ import {
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { initializeRunIdentity, reserveSteeredIdentity, reconcileSteeredIdentity } from "../run-identity.js";
 import { documentService } from "../documents.js";
+import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueService } from "../issues.js";
 import { PaperclipRunnerToolAuthority } from "./paperclip-runner-tool-authority.js";
 import { createAssignedMcpTools } from "./assigned-mcp-tools.js";
@@ -93,6 +94,36 @@ describe("PaperclipRunnerToolAuthority", () => {
 
   afterAll(async () => {
     await temporary?.cleanup();
+  });
+
+  it("keeps a reserved proposal decision human-only and resumes unfinished work after acceptance", async () => {
+    const taskId = randomUUID(), taskRunId = randomUUID(), userId = `proposal-owner-${randomUUID()}`;
+    await db.insert(authUsers).values({ id: userId, name: "Proposal owner", email: `${userId}@example.test`, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, status: "active", membershipRole: "member" });
+    await db.insert(issues).values({ id: taskId, companyId, title: "Decide a proposal before implementation", status: "in_progress", assigneeAgentId: agentId });
+    await db.insert(heartbeatRuns).values({ id: taskRunId, companyId, agentId, nativeIssueId: taskId, runtimeMode: "native", status: "running", contextSnapshot: { issueId: taskId } });
+    await db.update(issues).set({ executionRunId: taskRunId }).where(eq(issues.id, taskId));
+    const authority = new PaperclipRunnerToolAuthority(db, { companyId, issueId: taskId, agentId, runId: taskRunId });
+    expect(authority.definitions().find(tool => tool.name === "request_human_input")?.inputSchema)
+      .toMatchObject({ properties: { resolverPolicy: { enum: ["anyone", "not_creator", "human_only"] }, addresseeUserId: expect.any(Object) } });
+    expect((authority.definitions().find(tool => tool.name === "request_human_input")?.inputSchema as { properties: object }).properties)
+      .not.toHaveProperty("addresseeAgentId");
+    const request = { tool: "request_human_input", callId: "proposal", arguments: {
+      idempotencyKey: "proposal", interactionKind: "confirmation", title: "Choose the proposed scope",
+      prompt: "Accept or return this proposal; implementation is still unfinished.",
+      resolverPolicy: "human_only", addresseeUserId: userId, continuationPolicy: "wake_assignee",
+    } };
+    const result = await authority.execute(request) as { interaction: { id: string; effectiveResolverPolicy: string; addresseeUserId: string } };
+    expect(result.interaction).toMatchObject({ effectiveResolverPolicy: "human_only", addresseeUserId: userId });
+    expect(await authority.execute(request)).toMatchObject({ interaction: { id: result.interaction.id } });
+    await issueService(db).update(taskId, { status: "in_review", actorAgentId: agentId });
+    const task = { id: taskId, companyId, projectId: null, goalId: null, status: "in_review" };
+    await expect(issueThreadInteractionService(db).acceptInteraction(task, result.interaction.id, {}, { agentId, runId: taskRunId })).rejects.toThrow();
+    await issueThreadInteractionService(db).acceptInteraction(task, result.interaction.id, {}, { userId });
+    expect(await db.select().from(issues).where(eq(issues.id, taskId)))
+      .toMatchObject([{ status: "todo", assigneeAgentId: agentId, completedAt: null }]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, taskId)))
+      .toMatchObject([{ id: result.interaction.id, status: "accepted", resolvedByUserId: userId }]);
   });
 
   it("advertises only real bindings and reads the bound task", async () => {

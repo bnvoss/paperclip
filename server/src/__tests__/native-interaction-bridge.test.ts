@@ -307,7 +307,7 @@ describe("P6-19 native interaction bridge", () => {
     expect(error).toMatchObject({ code });
   });
 
-  it("routes accepted package-result attention through live issue and interaction owners", async () => {
+  it("keeps unknown package-result outcomes owned without creating completion reviews or delegation", async () => {
     const delegateId = "78000000-0000-4000-8000-000000000020";
     const outsideCompanyId = "78000000-0000-4000-8000-000000000021";
     const outsideAgentId = "78000000-0000-4000-8000-000000000022";
@@ -470,33 +470,25 @@ describe("P6-19 native interaction bridge", () => {
     expect(delegated).toEqual([]);
     const agentInteractions = await db.select().from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.issueId, scenarios[0]!.issueId));
-    expect(agentInteractions).toEqual([
-      expect.objectContaining({
-        kind: "request_confirmation",
-        status: "pending",
-        sourceRunId: scenarios[0]!.runId,
-        addresseeAgentId: delegateId,
-      }),
-    ]);
+    expect(agentInteractions).toEqual([]);
     const humanInteractions = await db.select().from(issueThreadInteractions)
       .where(eq(issueThreadInteractions.issueId, scenarios[1]!.issueId));
-    expect(humanInteractions).toEqual([
-      expect.objectContaining({ kind: "request_confirmation", status: "pending", sourceRunId: scenarios[1]!.runId }),
-    ]);
-    await expect(db.select().from(issues).where(eq(issues.id, scenarios[0]!.issueId))).resolves.toEqual([
-      expect.objectContaining({ status: "in_review" }),
-    ]);
-    await expect(db.select().from(issues).where(eq(issues.id, scenarios[1]!.issueId))).resolves.toEqual([
-      expect.objectContaining({ status: "in_review" }),
-    ]);
+    expect(humanInteractions).toEqual([]);
     await expect(db.select().from(issues).where(eq(issues.parentId, scenarios[2]!.issueId))).resolves.toHaveLength(0);
-    await expect(db.select().from(issueRecoveryActions)
-      .where(eq(issueRecoveryActions.sourceIssueId, scenarios[2]!.issueId))).resolves.toEqual([]);
     await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scenarios[2]!.runId))).resolves.toEqual([
       expect.objectContaining({ status: "succeeded", nativePhase: "committed" }),
     ]);
 
     for (const scenario of scenarios) {
+      await expect(db.select().from(issues).where(eq(issues.id, scenario.issueId))).resolves.toEqual([
+        expect.objectContaining({ status: "in_progress", assigneeAgentId: agentId, completedAt: null }),
+      ]);
+      await expect(db.select().from(issueRecoveryActions)
+        .where(eq(issueRecoveryActions.sourceIssueId, scenario.issueId))).resolves.toEqual([
+        expect.objectContaining({ ownerType: "agent", ownerAgentId: agentId, cause: "native_review_outcome_unknown" }),
+      ]);
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId)))
+        .filter(wake => wake.payload?.issueId === scenario.issueId)).toEqual([]);
       const assessments = await db.select().from(workAssessments)
         .where(eq(workAssessments.issueId, scenario.issueId));
       expect(assessments.map((row) => row.triggerKind)).toEqual(["native_result"]);
@@ -718,9 +710,9 @@ describe("P6-19 native interaction bridge", () => {
         .where(eq(agentWakeupRequests.companyId, companyId)))
         .filter((request) => (request.payload as Record<string, unknown> | null)?.issueId === seeded.issueId);
       if (label === "stale") {
-        expect(issueWakeups).toEqual([
-          expect.objectContaining({ payload: expect.objectContaining({ issueId: seeded.issueId }) }),
-        ]);
+        expect(issueWakeups).toEqual([]);
+        await expect(db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
+          .resolves.toEqual([expect.objectContaining({ ownerAgentId: agentId, cause: "native_review_outcome_unknown" })]);
       } else {
         // Duplicate actionable attention is owned by the review interaction;
         // it must not wake the agent before that human decision is resolved.

@@ -2,6 +2,7 @@ import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipa
 import { and, eq } from "drizzle-orm";
 import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import { claimNativeReviewExecutionLock, readNativeReviewAssignmentContext } from "./native-review-participant.js";
+import { issueTreeControlService } from "../issue-tree-control.js";
 
 /** The run, wake, and issue lock form one reviewer admission claim. */
 export async function claimQueuedNativeReviewRun(db: Db, input: {
@@ -19,6 +20,9 @@ export async function claimQueuedNativeReviewRun(db: Db, input: {
       eq(issues.id, issueId), eq(issues.companyId, input.run.companyId),
     )).for("update");
     if (!issue) return null;
+    // A temporary hold defers this claim; it does not invalidate the binding
+    // or consume the durable reviewer wake as a stale assignment.
+    if (await issueTreeControlService(tx as unknown as Db).getActivePauseHoldGate(input.run.companyId, issueId)) return null;
     if (input.run.wakeupRequestId) {
       const [wake] = await tx.select().from(agentWakeupRequests).where(and(
         eq(agentWakeupRequests.id, input.run.wakeupRequestId),

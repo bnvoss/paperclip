@@ -4,6 +4,7 @@ import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import {
   agents,
   companies,
+  completionContracts,
   createDb,
   heartbeatRuns,
   issues,
@@ -155,9 +156,14 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(run?.completionContractId).toBe(s.nextInput.completionContract.id);
       expect(run?.runnerProfileJson?.nativeExecutionInput).toMatchObject({
         completionContract: {
-          contract: { criteria: [{ requirement: "Now read Gmail" }] },
+          contract: { criteria: [
+            { id: "task_outcome", requirement: expect.stringContaining("Apply explicit later scope changes") },
+            { id: "objective", requirement: "Now read Gmail" },
+          ] },
         },
       });
+      const [prior] = await db.select().from(completionContracts).where(eq(completionContracts.id, s.oldInput.completionContract.id));
+      expect(prior?.contractJson.criteria).toEqual(s.oldInput.completionContract.contract.criteria);
     });
     it("incorporates later direction under the matching fenced recovery claim", async () => {
       const s = await setup();

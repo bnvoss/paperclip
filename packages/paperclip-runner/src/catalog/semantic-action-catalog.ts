@@ -221,7 +221,7 @@ const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
   descriptor({
     operationId: "request_human_input",
     title: "Request structured human input",
-    description: "Create a typed, durable interaction on the active task.",
+    description: "Create a typed, durable input or proposal decision on the active task. A response resumes its worker; it does not complete unfinished work. Select human_only only for an explicitly reserved human decision. Keep native agent review and external receiving identities distinct from the human responsible user.",
     effect: "write",
     allowedModes: ALL_MODES,
     inputSchema: object(
@@ -239,6 +239,8 @@ const descriptors: readonly PaperclipSemanticActionDescriptor[] = [
         title: text("Interaction card title.", 300),
         prompt: text("Question or decision prompt.", 10_000),
         payload: openObject,
+        resolverPolicy: { enum: ["anyone", "not_creator", "human_only"] },
+        addresseeUserId: nullableText("Exact authorized human recipient, when a specific person is required.", 240),
         targetRevisionId: nullableText(
           "Optional bound document revision.",
           240,

@@ -40,6 +40,7 @@ import {
   resolveExternalChatResponseWaitAuthorizationInTransaction,
 } from "./chat-attachment-reuse.js";
 import { issueService } from "../issues.js";
+import { issueTreeControlService } from "../issue-tree-control.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
@@ -1634,6 +1635,19 @@ export async function commitNativeStatusDecision(input: {
       issue.lastStatusDecisionId !== input.priorDecisionId
     ) {
       throw new NativeStatusRaceError();
+    }
+    if (input.decision.effects.some(effect => effect.kind === "bind_reviewer")) {
+      const [source] = await tx.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId),
+        eq(heartbeatRuns.nativeIssueId, input.issueId),
+      )).limit(1);
+      const [readiness, pause] = await Promise.all([
+        issueService(tx as unknown as Db).getDependencyReadiness(input.issueId, tx as unknown as Db),
+        issueTreeControlService(tx as unknown as Db).getActivePauseHoldGate(input.companyId, input.issueId),
+      ]);
+      if (!source || issue.assigneeAgentId !== source.agentId || issue.assigneeUserId ||
+          (issue.executionRunId && issue.executionRunId !== input.runId) ||
+          readiness.unresolvedBlockerCount > 0 || pause) throw new NativeStatusRaceError();
     }
     if (input.requireModelRejectionOwner || input.requireProviderFailureOwner) {
       const owner = (input.requireProviderFailureOwner ?? input.requireModelRejectionOwner)!;

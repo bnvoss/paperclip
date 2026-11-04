@@ -1,4 +1,5 @@
 import { and, eq, or } from "drizzle-orm";
+import { readNativeDocumentEvidence } from "./native-document-evidence.js";
 import type { Db } from "@paperclipai/db";
 import {
   approvals,
@@ -20,7 +21,7 @@ export type NativeEvidenceOutcome = "accepted" | "missing" | "rejected" | "unver
 
 export interface NativeEvidenceRefAssessment {
   ref: string;
-  kind: "event" | "work_product" | "approval" | "interaction" | "attachment" | "unknown";
+  kind: "event" | "work_product" | "approval" | "interaction" | "attachment" | "document" | "unknown";
   outcome: NativeEvidenceOutcome;
   reasonCode: string;
   durableRecordId: string | null;
@@ -107,6 +108,13 @@ async function classifyEvidenceRef(input: {
   runId: string;
   ref: string;
 }): Promise<NativeEvidenceRefAssessment> {
+  const document = await readNativeDocumentEvidence(input.db, input);
+  if (document) return {
+    ref: input.ref, kind: "document", outcome: document.exists ? "unverifiable" : "missing",
+    reasonCode: !document.exists ? "document_revision_missing" : document.current
+      ? "document_revision_persisted_claim_only" : "document_revision_superseded",
+    durableRecordId: document.exists ? document.revisionId : null,
+  };
   const eventMatch = /^event:(\d+)$/.exec(input.ref);
   if (eventMatch) {
     const cursor = Number(eventMatch[1]);

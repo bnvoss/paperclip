@@ -6,9 +6,10 @@ import { completionContracts } from "@paperclipai/db";
 import type { NativeCompletionSource, StrictCompletionContractInput } from "../../vendor/paperclip-runner/index.js";
 
 import { nativeSha256 } from "./canonical.js";
+import { isConversation, type ConversationIdentity } from "../agent-conversations.js";
 
 export const NATIVE_COMPLETION_CONTRACT_SCHEMA = "paperclip.completion-contract.v1";
-export const NATIVE_COMPLETION_POLICY_VERSION = "phase6-v4";
+export const NATIVE_COMPLETION_POLICY_VERSION = "phase6-v5";
 
 type CompletionComment = {
   id?: string;
@@ -75,7 +76,7 @@ export function resolveNativeCompletionPolicy(issue: {
 }
 
 export function buildNativeCompletionContract(
-  issue: { title: string; description: string | null },
+  issue: { title: string; description: string | null } & ConversationIdentity,
   options: {
     readonly revision?: number;
     readonly immediateRequest?: string | null;
@@ -92,9 +93,12 @@ export function buildNativeCompletionContract(
     .filter((request) => request.length > 0);
   const humanResponseId = options.humanResponseId?.trim();
   const hasFollowUp = immediateRequests.length > 0 || Boolean(humanResponseId);
+  const ordinaryFollowUp = hasFollowUp && !isConversation(issue);
   // Reference existing context rather than copying the brief/history into every
   // follow-up contract. Keep this guidance stable across comments and resumes.
-  const followUpObjective = "Complete the current authorized stage using the task brief and current user direction in the supplied context. Later human direction replaces conflicting scope; preserve other requirements, assigned-skill instructions, and approval gates. Apply authenticated humanResponses only to their question or decision. Clarification is not approval. If acceptance is required, propose or save the requested plan and wait before executing.";
+  const followUpObjective = ordinaryFollowUp
+    ? "Complete the current authorized task outcome using the supplied task brief and current direction. A scoped status or evidence reply does not close broader work or create an acceptance dependency. Later human direction replaces conflicting scope; preserve other requirements, assigned skills, and approval gates. Apply authenticated humanResponses only to their recorded scope. Clarification is not approval. Use existing input/approval paths only when explicitly required."
+    : "Complete the current authorized stage using the task brief and current user direction in the supplied context. Later human direction replaces conflicting scope; preserve other requirements, assigned-skill instructions, and approval gates. Apply authenticated humanResponses only to their question or decision. Clarification is not approval. If acceptance is required, propose or save the requested plan and wait before executing.";
   return {
     revision: String(options.revision ?? 1),
     objective: hasFollowUp
@@ -102,6 +106,10 @@ export function buildNativeCompletionContract(
       : issue.title,
     criteria: hasFollowUp
       ? [
+          ...(ordinaryFollowUp ? [{
+            id: "task_outcome",
+            requirement: "Deliver the whole currently authorized task outcome, including still-required work from the supplied task context. Apply explicit later scope changes. A reply to the current comment alone does not satisfy this criterion; keep it unsatisfied or unknown while broader required work remains.",
+          }] : []),
           ...immediateRequests.map((request, index) => ({
             id: immediateRequests.length === 1 ? "objective" : `pending_comment_${index + 1}`,
             requirement: request,
@@ -129,6 +137,8 @@ export async function ensureNativeCompletionContract(input: {
     title: string;
     description: string | null;
     reviewPolicy?: string | null;
+    conversationAgentId?: string | null;
+    conversationUserId?: string | null;
   };
   actorId: string;
   immediateRequest?: string | null;
