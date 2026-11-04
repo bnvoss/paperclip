@@ -96,6 +96,8 @@ export interface Config extends StorageConfig {
   skillVersionRetentionDryRun: boolean;
   skillVersionRetentionKeepNewest: number;
   skillVersionRetentionGraceMinutes: number;
+  runtimeAssetRetentionEnabled: boolean;
+  providerTraceRetentionWorkerEnabled: boolean;
   nativeHarnessBackupExpirationEnabled: boolean;
   nativeHarnessBackupExpirationDryRun: boolean;
   nativeHarnessBackupExpirationDays: number;
@@ -401,6 +403,10 @@ export function loadConfig(override?: PaperclipConfig | null): Config {
     skillVersionRetentionDryRun: process.env.PAPERCLIP_SKILL_VERSION_RETENTION_DRY_RUN === "true",
     skillVersionRetentionKeepNewest,
     skillVersionRetentionGraceMinutes,
+    // Disable automatic file reclamation independently of execution recovery.
+    // Trace access/capture still enforces its existing logical expiration.
+    runtimeAssetRetentionEnabled: process.env.PAPERCLIP_RUNTIME_ASSET_RETENTION_ENABLED !== "false",
+    providerTraceRetentionWorkerEnabled: process.env.PAPERCLIP_PROVIDER_TRACE_RETENTION_WORKER_ENABLED !== "false",
     nativeHarnessBackupExpirationEnabled: process.env.PAPERCLIP_NATIVE_HARNESS_BACKUP_EXPIRATION_ENABLED !== "false",
     nativeHarnessBackupExpirationDryRun: process.env.PAPERCLIP_NATIVE_HARNESS_BACKUP_EXPIRATION_DRY_RUN === "true",
     nativeHarnessBackupExpirationDays,

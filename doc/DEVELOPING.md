@@ -3219,6 +3219,13 @@ Environment overrides:
   non-numeric value falls back to the default.
 - `PAPERCLIP_WORKSPACE_COMPACTION_ENABLED=false` turns compaction off. Any other
   value keeps it on.
+- `PAPERCLIP_RUNTIME_ASSET_RETENTION_ENABLED=false` disables the automatic worker
+  that expires runtime-context asset bundles and manifests. Default: enabled.
+  Asset materialization and ordinary execution recovery remain available.
+- `PAPERCLIP_PROVIDER_TRACE_RETENTION_WORKER_ENABLED=false` disables automatic
+  provider-trace cleanup. Default: enabled. Existing expiration on trace access
+  or capture, and explicit deletion, still apply; this is not a trace-expiry
+  extension or a legal hold.
 - `PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED=false` disables external writes and automatic
   package maintenance for a coordinated rolling upgrade. Default: enabled. Legacy
   conversion runs automatically in bounded batches, outside turn preparation.

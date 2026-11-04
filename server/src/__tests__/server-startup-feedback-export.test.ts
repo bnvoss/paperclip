@@ -288,6 +288,8 @@ function buildTestConfig(overrides: Record<string, unknown> = {}) {
     databaseBackupIntervalMinutes: 60,
     databaseBackupRetentionDays: 30,
     databaseBackupDir: "/tmp/paperclip-test-backups",
+    runtimeAssetRetentionEnabled: true,
+    providerTraceRetentionWorkerEnabled: true,
     serveUi: false,
     uiDevMiddleware: false,
     secretsProvider: "local_encrypted",
@@ -783,6 +785,24 @@ describe("startServer feedback export wiring", () => {
     loadConfigMock.mockReturnValue(buildTestConfig({ heartbeatSchedulerEnabled: enabled }));
     await startServer(); await settleStartupHousekeeping();
     expect(deliveryWorkRegisterMock.mock.calls.filter(([queue]) => queue === DELIVERY_QUEUES.providerTraceRetention)).toHaveLength(1);
+  });
+
+  it.each([false, true])("can disable automatic file retention without changing heartbeat scheduling (%s)", async enabled => {
+    loadConfigMock.mockReturnValue(buildTestConfig({
+      heartbeatSchedulerEnabled: enabled,
+      runtimeAssetRetentionEnabled: false,
+      providerTraceRetentionWorkerEnabled: false,
+    }));
+    await startServer(); await settleStartupHousekeeping();
+    for (const queue of [DELIVERY_QUEUES.runtimeAssetRetention, DELIVERY_QUEUES.providerTraceRetention]) {
+      expect(deliveryWorkRegisterMock.mock.calls.filter(([registered]) => registered === queue)).toHaveLength(0);
+    }
+    expect(heartbeatServiceMock.recoverNativeRunsAfterRestart).toHaveBeenCalledTimes(enabled ? 1 : 0);
+  });
+
+  it("registers automatic runtime asset retention with the default enabled control", async () => {
+    await startServer(); await settleStartupHousekeeping();
+    expect(deliveryWorkRegisterMock.mock.calls.filter(([queue]) => queue === DELIVERY_QUEUES.runtimeAssetRetention)).toHaveLength(1);
   });
 
   it.each([false, true])("registers skill cache retention only when enabled (%s)", async enabled => {

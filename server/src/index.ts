@@ -1370,10 +1370,14 @@ async function startServerWithDatabaseTeardown(
   const runEvidenceMigrationWork = registerRunEvidenceMigrationWork(db, deliveryWork,
     () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(), { storageProvider: config.storageProvider });
   if (runEvidenceMigrationWork) trackHeartbeatSchedulerWork(runEvidenceMigrationWork.ready);
-  const providerTraceRetentionWork = registerProviderTraceRetentionWork(db, deliveryWork,
-    () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby());
-  trackHeartbeatSchedulerWork(providerTraceRetentionWork.ready);
-  server.on("close", providerTraceRetentionWork.stop);
+  const providerTraceRetentionWork = config.providerTraceRetentionWorkerEnabled
+    ? registerProviderTraceRetentionWork(db, deliveryWork,
+      () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby())
+    : null;
+  if (providerTraceRetentionWork) {
+    trackHeartbeatSchedulerWork(providerTraceRetentionWork.ready);
+    server.on("close", providerTraceRetentionWork.stop);
+  }
   const executionSchedule = executionControlSchedule(db);
   const workspaceRecoveryRuntime = environmentRuntimeService(db, { pluginWorkerManager });
   const nativeRunnerEvidenceRetentionWorker = config.nativeHarnessBackupExpirationEnabled
@@ -1416,8 +1420,10 @@ async function startServerWithDatabaseTeardown(
   server.on("close", accountingWorker.stop);
   skillSourceSync.start(deliveryWork);
   skillPackageWork(db).start(deliveryWork);
-  const runtimeAssetCleanup = runtimeAssetRetention(db).start(deliveryWork);
-  server.on("close", () => { void runtimeAssetCleanup.stop(); });
+  const runtimeAssetCleanup = config.runtimeAssetRetentionEnabled
+    ? runtimeAssetRetention(db).start(deliveryWork)
+    : null;
+  if (runtimeAssetCleanup) server.on("close", () => { void runtimeAssetCleanup.stop(); });
   const caseHandoffDeliveries = caseHandoffDeliveryService(db as any, { heartbeat: environmentLeaseCleanupHeartbeat });
   deliveryWork.register(DELIVERY_QUEUES.caseHandoffs, {
     retryMs: 5_000,
@@ -2131,7 +2137,7 @@ async function startServerWithDatabaseTeardown(
     unsubscribeRetainedNativeSessionCleanup?.();
     await deliveryWork.stop();
     await runEvidenceMigrationWork?.stop();
-    await providerTraceRetentionWork.stop();
+    await providerTraceRetentionWork?.stop();
     await skillVersionRetentionWorker?.dispose();
     await workspaceRecoveryWork.stop();
     unregisterTerminalWorkspaceProbe?.();
